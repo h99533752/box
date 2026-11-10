@@ -21,6 +21,7 @@
 <div id="bar">
   <button id="bStart">카메라 시작</button>
   <select id="cam"></select>
+  <button id="bFlip">앞/뒤 카메라 전환</button>
   <select id="side"><option value="ALL">보관함 둘 다</option><option value="L">왼쪽만(25~111)</option><option value="R">오른쪽만(61~112)</option></select>
   <button id="bCal">칸 맞추기</button>
   <button id="bBase">빈 보관함 기준 저장</button>
@@ -314,6 +315,14 @@ $('thr').oninput = e => {
 };
 $('bStart').onclick = () => startCam($('cam').value || null);
 $('cam').onchange = e => startCam(e.target.value);
+// 앞/뒤 카메라 전환(전면이 더 넓게 보이는 기기도 있음). 고른 방향은 이 기기에 기억
+let facing = (function(){ try { return localStorage.getItem('nxfacing') || 'environment'; } catch (e) { return 'environment'; } })();
+$('bFlip').onclick = () => {
+  facing = facing === 'environment' ? 'user' : 'environment';
+  try { localStorage.setItem('nxfacing', facing); } catch (e) {}
+  startCam(null);
+  msg(facing === 'user' ? '앞면 카메라로 바꿨어요. 칸 위치가 달라지니 [칸 맞추기]를 다시 해 주세요' : '뒷면 카메라로 바꿨어요. 칸 위치가 달라지니 [칸 맞추기]를 다시 해 주세요');
+};
 $('side').value = side;
 $('side').onchange = async e => {
   side = e.target.value;
@@ -332,7 +341,7 @@ async function startCam(deviceId) {
     // 4:3 큰 해상도로 요청 → 동영상용 16:9보다 센서를 넓게 써서 카메라 앱 사진 화면에 가깝게 보임
     const size = {width: {ideal: 2560}, height: {ideal: 1920}, aspectRatio: {ideal: 4 / 3}};
     const video = deviceId ? Object.assign({deviceId: {exact: deviceId}}, size)
-                           : Object.assign({facingMode: {ideal: 'environment'}}, size);
+                           : Object.assign({facingMode: {ideal: facing}}, size);
     stream = await navigator.mediaDevices.getUserMedia({video, audio: false});
     v.srcObject = stream; await v.play();
     const devs = (await navigator.mediaDevices.enumerateDevices()).filter(d => d.kind === 'videoinput');
