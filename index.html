@@ -2,15 +2,23 @@
 <html>
 <head>
 <base target="_top">
+<link rel="manifest" href="manifest.json">
+<meta name="mobile-web-app-capable" content="yes">
+<title>넥스트 보관함 감시</title>
 <meta charset="utf-8">
 <style>
   body{margin:0;font-family:-apple-system,"Malgun Gothic",sans-serif;background:#111;color:#eee}
   #bar{display:flex;flex-wrap:wrap;gap:6px;padding:8px;background:#222}
   #bar.hide,#stat.hide{display:none}
   #bMenu{position:fixed;top:6px;right:6px;z-index:5;background:#2563eb;opacity:.85}
+  #bFull{position:fixed;top:6px;right:118px;z-index:5;background:#2563eb;opacity:.85}
+  :fullscreen #bFull{display:none}
+  #zoom{position:fixed;right:6px;bottom:10px;z-index:5;display:flex;flex-direction:column;align-items:center;gap:4px;background:rgba(0,0,0,.5);padding:6px;border-radius:10px}
+  #zoom button{font-size:22px;width:52px;height:52px;padding:0;background:#2563eb}
+  #zv{font-size:13px}
   button,select{font-size:15px;padding:9px 11px;border-radius:8px;border:0;background:#3a3a3a;color:#fff}
   button.on{background:#2563eb}
-  #msg{padding:10px;font-size:17px;background:#1d3557;line-height:1.4}
+  #msg{padding:10px 230px 10px 10px;font-size:17px;background:#1d3557;line-height:1.4}
   #msg.err{background:#7f1d1d}
   #stat{padding:6px 8px;font-size:13px;color:#bbb}
   canvas{display:block;margin:0 auto;max-width:100%;max-height:86vh;width:auto;height:auto;touch-action:none}
@@ -21,6 +29,8 @@
 </head>
 <body>
 <button id="bMenu">메뉴 숨기기</button>
+<div id="zoom"><button id="zIn">＋</button><span id="zv">1배</span><button id="zOut">－</button></div>
+<button id="bFull">전체 화면</button>
 <div id="bar">
   <button id="bStart">카메라 시작</button>
   <select id="cam"></select>
@@ -242,27 +252,43 @@ async function flush() {
 }
 
 /* ===== 그리기 ===== */
+/* ===== 확대 보기(칸 맞추기용) — 검사에는 영향 없음 ===== */
+let vz = 1, vcx = 0.5, vcy = 0.5;
+const full = document.createElement('canvas'), fctx = full.getContext('2d');
+function viewWin() {
+  const w = 1 / vz;
+  return {w, x0: Math.min(Math.max(vcx - w / 2, 0), 1 - w), y0: Math.min(Math.max(vcy - w / 2, 0), 1 - w)};
+}
+function setZoom(z) { vz = Math.max(1, Math.min(4, z)); $('zv').textContent = vz + '배'; render(); }
 function render() {
   if (v.videoWidth) {
     const [W, H] = frameSize();
     const s = Math.min(1, 1280 / Math.max(W, H));
     view.width = Math.round(W * s); view.height = Math.round(H * s);
-    drawFrame(vctx, view.width, view.height);
+    if (vz === 1) drawFrame(vctx, view.width, view.height);
+    else {
+      const fs = Math.min(1, 1800 / Math.max(W, H));
+      full.width = Math.round(W * fs); full.height = Math.round(H * fs);
+      drawFrame(fctx, full.width, full.height);
+      const z = viewWin();
+      vctx.drawImage(full, z.x0 * full.width, z.y0 * full.height, z.w * full.width, z.w * full.height, 0, 0, view.width, view.height);
+    }
   }
   const VW = view.width, VH = view.height;
+  const Z = viewWin(), SX = nx => (nx - Z.x0) / Z.w * VW, SY = ny => (ny - Z.y0) / Z.w * VH;
   vctx.lineWidth = 2; vctx.font = 'bold 13px sans-serif';
   regions.forEach(r => {
     const st = slotState[r.slot];
     const col = !st || st.s === null ? '#999' : st.p ? '#facc15' : st.s ? '#22c55e' : '#64748b';
     vctx.strokeStyle = col;
-    vctx.strokeRect(r.x0 * VW, r.y0 * VH, (r.x1 - r.x0) * VW, (r.y1 - r.y0) * VH);
+    vctx.strokeRect(SX(r.x0), SY(r.y0), (r.x1 - r.x0) / Z.w * VW, (r.y1 - r.y0) / Z.w * VH);
     vctx.fillStyle = col;
     const sc = lastScores[r.slot];
-    vctx.fillText(r.slot + (sc !== undefined ? ' ' + sc : ''), r.x0 * VW, r.y0 * VH - 3);
+    vctx.fillText(r.slot + (sc !== undefined ? ' ' + sc : ''), SX(r.x0), SY(r.y0) - 3);
   });
   if (mode === 'cal') {
     vctx.fillStyle = '#f43f5e';
-    calTmp.forEach(p => { vctx.beginPath(); vctx.arc(p.x * VW, p.y * VH, 6, 0, 7); vctx.fill(); });
+    calTmp.forEach(p => { vctx.beginPath(); vctx.arc(SX(p.x), SY(p.y), 6, 0, 7); vctx.fill(); });
   }
   const occ = Object.values(slotState).filter(s => s.s === 1).length;
   $('stat').textContent = `마지막 검사 ${lastCheck ? hhmmss(lastCheck) : '-'} · 꽂힘 ${occ}칸 · 못 보낸 기록 ${queue.length}개 · 서버 ${serverOk === null ? '-' : serverOk ? '정상' : '연결 안 됨'}`;
@@ -275,9 +301,20 @@ function calPrompt() {
   const slot = first ? row.slots[0] : row.slots[row.slots.length - 1];
   msg(`${row.box === 'L' ? '왼쪽' : '오른쪽'} 보관함 ${slot}번 번호표 가운데를 누르세요 (${calStep + 1}/${activeRows().length * 2})`);
 }
-view.addEventListener('pointerdown', async e => {
-  const rect = view.getBoundingClientRect();
-  const x = (e.clientX - rect.left) / rect.width, y = (e.clientY - rect.top) / rect.height;
+let down = null;
+view.addEventListener('pointerdown', e => { down = {x: e.clientX, y: e.clientY, cx: vcx, cy: vcy, moved: false}; });
+view.addEventListener('pointermove', e => {
+  if (!down || vz === 1) return;
+  const rect = view.getBoundingClientRect(), w = 1 / vz;
+  const dx = e.clientX - down.x, dy = e.clientY - down.y;
+  if (Math.abs(dx) + Math.abs(dy) > 12) down.moved = true;
+  if (down.moved) { vcx = down.cx - dx / rect.width * w; vcy = down.cy - dy / rect.height * w; render(); }
+});
+view.addEventListener('pointerup', async e => {
+  const d = down; down = null;
+  if (!d || d.moved) return; // 끌어서 옮긴 건 누른 걸로 치지 않음
+  const rect = view.getBoundingClientRect(), Z = viewWin();
+  const x = Z.x0 + (e.clientX - rect.left) / rect.width * Z.w, y = Z.y0 + (e.clientY - rect.top) / rect.height * Z.w;
   if (mode === 'cal') {
     calTmp.push({x, y}); calStep++;
     if (calStep >= activeRows().length * 2) {
@@ -330,6 +367,21 @@ function setMenu(show) {
   try { localStorage.setItem('nxmenu', show ? '1' : '0'); } catch (e) {}
 }
 $('bMenu').onclick = () => setMenu($('bar').classList.contains('hide'));
+// 브라우저 주소창까지 숨기는 전체 화면(+가로 고정). 새로고침하면 풀려서, 다음에 화면을 처음 누를 때 자동으로 다시 켬
+async function goFull() {
+  try {
+    if (!document.fullscreenElement && document.documentElement.requestFullscreen) await document.documentElement.requestFullscreen();
+    if (screen.orientation && screen.orientation.lock) await screen.orientation.lock('landscape').catch(() => {});
+    try { localStorage.setItem('nxfull', '1'); } catch (e) {}
+  } catch (e) { msg('이 브라우저는 전체 화면을 막았어요: ' + (e.message || e)); }
+}
+$('bFull').onclick = goFull;
+$('zIn').onclick = () => setZoom(vz + 1);
+$('zOut').onclick = () => setZoom(vz - 1);
+document.addEventListener('pointerdown', () => {
+  let want = false; try { want = localStorage.getItem('nxfull') === '1'; } catch (e) {}
+  if (want && !document.fullscreenElement) goFull();
+}, true);
 setMenu((function(){ try { return localStorage.getItem('nxmenu') !== '0'; } catch (e) { return true; } })());
 // AMOLED(노트9) 번인 방지: 검은 화면으로 가려도 카메라·검사는 계속 돈다
 let dimmed = false;
