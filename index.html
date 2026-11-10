@@ -341,7 +341,8 @@ document.addEventListener('visibilitychange', () => { if (document.visibilitySta
   await loadSettings();
   await startCam(null);
   setInterval(check, INTERVAL);
-  setInterval(() => { if (mode !== 'cal' && !dimmed) render(); }, 1000);
+  // 충전기 연결 전제: 화면이 켜져 있을 때는 부드럽게(초당 약 10장), 검은 화면일 때는 그리지 않음
+  setInterval(() => { if (!dimmed) render(); }, 100);
   armIdle(); // 3분 동안 손대지 않으면 자동으로 검은 화면
 })();
 </script>
