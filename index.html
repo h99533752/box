@@ -9,7 +9,9 @@
 <style>
   body{margin:0;font-family:-apple-system,"Malgun Gothic",sans-serif;background:#111;color:#eee}
   #bar{display:flex;flex-wrap:wrap;gap:6px;padding:8px;background:#222}
-  #bar.hide,#stat.hide{display:none}
+  #bar.hide,#stat.hide,#more.hide{display:none}
+  #more{width:100%;display:flex;flex-direction:column;gap:6px;padding-top:6px;border-top:1px solid #444}
+  .grp{display:flex;flex-wrap:wrap;gap:6px;align-items:center;font-size:13px;color:#aaa}
   #bMenu{position:fixed;top:6px;right:6px;z-index:5;background:#2563eb;opacity:.85}
   #bFull{position:fixed;top:6px;right:118px;z-index:5;background:#2563eb;opacity:.85}
   :fullscreen #bFull{display:none}
@@ -32,24 +34,18 @@
 <div id="zoom"><button id="zIn">＋</button><span id="zv">1배</span><button id="zOut">－</button></div>
 <button id="bFull">전체 화면</button>
 <div id="bar">
-  <button id="bStart">카메라 시작</button>
-  <select id="cam"></select>
-  <button id="bFlip">앞/뒤 카메라 전환</button>
-  <button id="bRot">화면 90° 돌리기</button>
-  <button id="bMir">좌우 뒤집기</button>
-  <select id="side"><option value="ALL">보관함 둘 다</option><option value="L">왼쪽만(25~111)</option><option value="R">오른쪽만(61~112)</option></select>
-  <button id="bCal">칸 맞추기</button>
-  <button id="bBase">빈 보관함 기준 저장</button>
-  <button id="bOne">이 칸만 빈칸으로</button>
-  <span style="display:flex;gap:4px;align-items:center;font-size:13px">네모 조정
-    <button id="gUp">위로</button><button id="gDn">아래로</button>
-    <button id="gTall">길게</button><button id="gShort">짧게</button>
-    <button id="gWide">넓게</button><button id="gNarrow">좁게</button></span>
-  <button id="bNow">지금 검사</button>
-  <button id="bDim">화면 검게(번인 방지)</button>
-  <label>민감도 <input id="thr" type="range" min="5" max="60" value="20"><span id="thrv">20</span>%</label>
+  <button id="bCal">① 칸 맞추기</button>
+  <button id="bBase">② 빈 보관함 기준 저장</button>
+  <button id="bDim">화면 검게</button>
+  <button id="bMore">설정 ▾</button>
+  <div id="more" class="hide">
+    <div class="grp">카메라 <select id="cam"></select><button id="bStart">다시 켜기</button><button id="bFlip">앞/뒤</button><button id="bRot">90° 돌리기</button><button id="bMir">좌우 뒤집기</button></div>
+    <div class="grp">맡을 보관함 <select id="side"><option value="ALL">둘 다</option><option value="L">왼쪽만(25~111)</option><option value="R">오른쪽만(61~112)</option></select></div>
+    <div class="grp">네모 조정 <button id="gUp">위로</button><button id="gDn">아래로</button><button id="gTall">길게</button><button id="gShort">짧게</button><button id="gWide">넓게</button><button id="gNarrow">좁게</button></div>
+    <div class="grp"><button id="bOne">이 칸만 빈칸으로</button><button id="bNow">지금 검사</button><label>민감도 <input id="thr" type="range" min="5" max="60" value="20"><span id="thrv">20</span>%</label></div>
+  </div>
 </div>
-<div id="msg">① 카메라 시작 → ② 칸 맞추기(처음 한 번) → ③ 보관함이 비었을 때 '빈 보관함 기준 저장'</div>
+<div id="msg">① 칸 맞추기(처음 한 번) → ② 보관함이 비었을 때 빈 보관함 기준 저장. 그다음부터는 거치대를 옮겨도 저절로 다시 맞춰요</div>
 <div id="stat"></div>
 <canvas id="view"></canvas>
 <video id="v" playsinline muted autoplay></video>
@@ -135,6 +131,8 @@ async function loadSettings() {
   try { s = await call({type: 'loadSettings', side}); } catch (e) {}
   if (!s || !s.calib) { const l = loadLocal('nxset_' + side, null); if (l) s = {calib: l.calib, base: l.base, threshold: l.thr}; }
   if (s) { calib = s.calib; decodeBase(s.base); if (s.threshold) thr = s.threshold; }
+  anchor = loadLocal('nxanchor_' + side, null); off = {x: 0, y: 0}; camBad = 0; camAlarm = false;
+  computeRegions(); await loadRef();
   $('thr').value = thr; $('thrv').textContent = thr;
   computeRegions();
 }
@@ -148,7 +146,8 @@ function adjGeom(k, d) {
   geom.w = Math.max(0.1, Math.min(0.5, geom.w));
   try { localStorage.setItem('nxgeom', JSON.stringify(geom)); } catch (e) {}
   computeRegions(); slotState = {}; prevFeat = {}; lastScores = {};
-  msg('네모를 조정했어요. 다 맞추면 보관함이 비었을 때 [빈 보관함 기준 저장]을 다시 눌러 주세요');
+  if (baseFromRef()) { prepRef(); saveSettings(); msg('네모를 조정했어요. 빈칸 기준도 자동으로 다시 계산했어요'); }
+  else msg('네모를 조정했어요. 다 맞추면 보관함이 비었을 때 ② 빈 보관함 기준 저장을 눌러 주세요');
   render();
 }
 function computeRegions() {
@@ -214,15 +213,218 @@ function feat(img, W, H, r) {
 }
 function fracDiff(a, b, k) { let n = 0; for (let i = 0; i < a.length; i++) if (Math.abs(a[i] * k - b[i]) > DIFF) n++; return n / a.length; }
 
+/* ===== 카메라 움직임 확인 =====
+ 빈 보관함 기준을 저장할 때, 폰이 안 들어가는 자리(번호표 줄·보관함 틀)를 작은 그림으로 같이 저장.
+ 검사 때마다 지금 화면과 맞대 보고
+  - 조금 밀렸으면: 네모를 같이 옮김(자동 보정)
+  - 많이 움직였으면: 감지를 멈추고 경고 + 시트에 기록 */
+const AW = 240, AR_ = 12; // 비교용 그림 폭, 찾아볼 범위(±픽셀, 폭의 약 5%)
+const small = document.createElement('canvas'), sctx = small.getContext('2d', {willReadFrequently: true});
+let anchor = null; // loadSettings에서 이 기기·이 보관함 것으로 읽음
+let off = {x: 0, y: 0}, camBad = 0, camAlarm = false;
+function smallGray() {
+  const [W, H] = frameSize(); const h = Math.round(AW * H / W);
+  small.width = AW; small.height = h; drawFrame(sctx, AW, h);
+  const d = sctx.getImageData(0, 0, AW, h).data, g = new Uint8Array(AW * h);
+  for (let i = 0; i < g.length; i++) g[i] = d[i * 4] * 0.299 + d[i * 4 + 1] * 0.587 + d[i * 4 + 2] * 0.114;
+  return {g, w: AW, h};
+}
+function anchorMask(w, h) { // 보관함 둘레(조금 넓게) 안 + 폰 자리(네모) 밖 = 안 변하는 곳
+  const m = new Uint8Array(w * h); if (!regions.length) return m;
+  let x0 = 1, y0 = 1, x1 = 0, y1 = 0;
+  regions.forEach(r => { x0 = Math.min(x0, r.x0); y0 = Math.min(y0, r.y0); x1 = Math.max(x1, r.x1); y1 = Math.max(y1, r.y1); });
+  const px = (x1 - x0) * 0.05, py = (y1 - y0) * 0.08;
+  const X0 = Math.max(AR_, Math.floor((x0 - px) * w)), X1 = Math.min(w - AR_, Math.ceil((x1 + px) * w));
+  const Y0 = Math.max(AR_, Math.floor((y0 - py) * h)), Y1 = Math.min(h - AR_, Math.ceil((y1 + py) * h));
+  for (let y = Y0; y < Y1; y++) for (let x = X0; x < X1; x++) m[y * w + x] = 1;
+  regions.forEach(r => {
+    for (let y = Math.max(0, Math.floor(r.y0 * h) - 1); y < Math.min(h, Math.ceil(r.y1 * h) + 1); y++)
+      for (let x = Math.max(0, Math.floor(r.x0 * w) - 1); x < Math.min(w, Math.ceil(r.x1 * w) + 1); x++) m[y * w + x] = 0;
+  });
+  return m;
+}
+function saveAnchor() {
+  const s = smallGray();
+  anchor = {w: s.w, h: s.h, g: toHex(s.g), noise: 0};
+  off = {x: 0, y: 0}; camBad = 0; camAlarm = false;
+  saveLocal('nxanchor_' + side, anchor);
+}
+function shiftErr(ref, cur, m, w, h, dx, dy, k) {
+  let e = 0, n = 0;
+  for (let y = AR_; y < h - AR_; y += 2) for (let x = AR_; x < w - AR_; x += 2) {
+    const i = y * w + x; if (!m[i]) continue;
+    e += Math.abs(cur[(y + dy) * w + x + dx] * k - ref[i]); n++;
+  }
+  return n ? e / n : 999;
+}
+// 돌려주는 값: 'ok' | 'skip'(이번만 건너뜀) | 'alarm'
+async function camCheck() {
+  if (!anchor || !anchor.g) return 'ok';
+  const cur = smallGray(); if (cur.h !== anchor.h) return 'ok';
+  const ref = fromHex(anchor.g), m = anchorMask(cur.w, cur.h);
+  let rs = 0, cs2 = 0; for (let i = 0; i < m.length; i++) if (m[i]) { rs += ref[i]; cs2 += cur.g[i]; }
+  const k = Math.min(1.6, Math.max(0.6, cs2 ? rs / cs2 : 1));
+  let best = {e: 1e9, x: 0, y: 0};
+  for (let dy = -AR_; dy <= AR_; dy++) for (let dx = -AR_; dx <= AR_; dx++) {
+    const e = shiftErr(ref, cur.g, m, cur.w, cur.h, dx, dy, k);
+    if (e < best.e) best = {e, x: dx, y: dy};
+  }
+  if (!anchor.noise) { anchor.noise = Math.max(4, best.e); saveLocal('nxanchor_' + side, anchor); }
+  const atEdge = Math.abs(best.x) === AR_ || Math.abs(best.y) === AR_;
+  const bad = atEdge || best.e > anchor.noise * 2.5;
+  const st = camFlag(bad);
+  if (st === 'ok') off = {x: best.x / cur.w, y: best.y / cur.h}; // 여기 화면이 기준보다 (x,y)만큼 밀림 → 네모도 같이 이동
+  return st;
+}
+const sh = r => ({slot: r.slot, x0: r.x0 + off.x, x1: r.x1 + off.x, y0: r.y0 + off.y, y1: r.y1 + off.y});
+
+/* ===== 자동 다시 맞추기 =====
+ 빈 보관함 기준 사진(번호표·틀 무늬)과 지금 화면을 대조해 '기준 사진 → 지금 화면' 대응(Hn)을 매번 새로 구함.
+ 거치대를 옮기거나 각도·거리가 바뀌어도 지금 화면을 기준 사진 자리로 펴서(aligned) 같은 네모로 검사한다.
+ 그림 처리 도구(OpenCV)를 못 불러오면 위의 '작은 흔들림 보정'만 쓴다. */
+const CV_URL = 'https://cdn.jsdelivr.net/npm/@techstark/opencv-js@4.10.0-release.1/dist/opencv.js';
+const REF_W = 1024;
+let CV = null, refImg = null, refPrep = null, Hn = null, aligned = null, lastInl = 0;
+const refCan = document.createElement('canvas'), rctx = refCan.getContext('2d', {willReadFrequently: true});
+function loadCv() {
+  const sc = document.createElement('script'); sc.src = CV_URL; sc.async = true;
+  sc.onload = async () => {
+    try {
+      let c = window.cv;
+      if (c && typeof c.then === 'function' && !c.Mat) c = (await new Promise(r => c.then(m => r({m})))).m;
+      if (!c.Mat) await new Promise(r => { c.onRuntimeInitialized = r; });
+      CV = c; prepRef(); render();
+    } catch (e) { msg('자동 다시 맞추기 도구를 못 불러왔어요. 작은 흔들림 보정만 써요 (' + (e.message || e) + ')', true); }
+  };
+  sc.onerror = () => msg('자동 다시 맞추기 도구를 못 불러왔어요(인터넷 확인). 작은 흔들림 보정만 써요', true);
+  document.head.appendChild(sc);
+}
+function frameAt(w) {
+  const [W, H] = frameSize(), h = Math.round(w * H / W);
+  refCan.width = w; refCan.height = h; drawFrame(rctx, w, h);
+  return rctx.getImageData(0, 0, w, h);
+}
+function saveRef() {
+  refImg = frameAt(REF_W);
+  try { localStorage.setItem('nxref_' + side, refCan.toDataURL('image/jpeg', 0.92)); } catch (e) {}
+  Hn = null; aligned = null; prepRef();
+}
+function loadRef() {
+  refImg = null; Hn = null; aligned = null; prepRef();
+  let u = null; try { u = localStorage.getItem('nxref_' + side); } catch (e) {}
+  if (!u) return Promise.resolve();
+  return new Promise(res => {
+    const im = new Image();
+    im.onload = () => { const c = document.createElement('canvas'); c.width = im.width; c.height = im.height; const x = c.getContext('2d'); x.drawImage(im, 0, 0); refImg = x.getImageData(0, 0, im.width, im.height); prepRef(); res(); };
+    im.onerror = () => res(); im.src = u;
+  });
+}
+function prepRef() { // 기준 사진에서 '폰이 안 들어가는 자리'의 무늬 점을 뽑아 둔다
+  if (refPrep) { refPrep.kp.delete(); refPrep.des.delete(); refPrep = null; }
+  if (!CV || !refImg || !regions.length) return;
+  const cv = CV, w = refImg.width, h = refImg.height;
+  const src = cv.matFromImageData(refImg), gray = new cv.Mat(); cv.cvtColor(src, gray, cv.COLOR_RGBA2GRAY);
+  const m = anchorMask(w, h), mask = new cv.Mat(h, w, cv.CV_8UC1);
+  for (let i = 0; i < m.length; i++) mask.data[i] = m[i] ? 255 : 0;
+  const orb = new cv.ORB(2500), kp = new cv.KeyPointVector(), des = new cv.Mat();
+  orb.detectAndCompute(gray, mask, kp, des);
+  src.delete(); gray.delete(); mask.delete(); orb.delete();
+  refPrep = {kp, des, w, h};
+}
+function hMap(h, x, y) { const d = h[6] * x + h[7] * y + h[8]; return [(h[0] * x + h[1] * y + h[2]) / d, (h[3] * x + h[4] * y + h[5]) / d]; }
+function hInv(h) {
+  const [a, b, c, d, e, f, g, i, k] = h;
+  const A = e * k - f * i, B = -(d * k - f * g), C = d * i - e * g, det = a * A + b * B + c * C;
+  return [A, -(b * k - c * i), b * f - c * e, B, a * k - c * g, -(a * f - c * d), C, -(a * i - b * g), a * e - b * d].map(t => t / det);
+}
+// 정규 좌표(0~1)로 바꾼 대응: 기준 사진 위 점 → 지금 화면 위 점
+const toCur = (x, y) => Hn ? hMap(Hn, x, y) : [x + off.x, y + off.y];
+const toRef = (x, y) => Hn ? hMap(hInv(Hn), x, y) : [x - off.x, y - off.y];
+function sane(H, w, h) { // 보관함 둘레가 말이 되는 모양으로 옮겨졌는지(뒤집힘·찌그러짐 거름)
+  let x0 = 1, y0 = 1, x1 = 0, y1 = 0;
+  regions.forEach(r => { x0 = Math.min(x0, r.x0); y0 = Math.min(y0, r.y0); x1 = Math.max(x1, r.x1); y1 = Math.max(y1, r.y1); });
+  const P = [[x0, y0], [x1, y0], [x1, y1], [x0, y1]].map(([x, y]) => hMap(H, x * w, y * h));
+  let area = 0, sign = 0;
+  for (let i = 0; i < 4; i++) {
+    const [ax, ay] = P[i], [bx, by] = P[(i + 1) % 4], [cx, cy] = P[(i + 2) % 4];
+    area += ax * by - bx * ay;
+    const cr = Math.sign((bx - ax) * (cy - by) - (by - ay) * (cx - bx));
+    if (sign && cr && cr !== sign) return false; sign = sign || cr;
+  }
+  const ratio = Math.abs(area / 2) / ((x1 - x0) * w * (y1 - y0) * h);
+  return ratio > 0.25 && ratio < 4;
+}
+function align() { // 성공하면 true (Hn·aligned 갱신)
+  const cv = CV, cur = frameAt(refPrep.w);
+  if (cur.height !== refPrep.h) return false;
+  const src = cv.matFromImageData(cur), gray = new cv.Mat(); cv.cvtColor(src, gray, cv.COLOR_RGBA2GRAY);
+  const orb = new cv.ORB(4000), kp = new cv.KeyPointVector(), des = new cv.Mat(), none = new cv.Mat();
+  orb.detectAndCompute(gray, none, kp, des);
+  let ok = false;
+  if (des.rows >= 10 && refPrep.des.rows >= 10) {
+    const bf = new cv.BFMatcher(cv.NORM_HAMMING, false), mm = new cv.DMatchVectorVector();
+    bf.knnMatch(refPrep.des, des, mm, 2);
+    const a = [], b = [];
+    for (let i = 0; i < mm.size(); i++) {
+      const pr = mm.get(i); if (pr.size() < 2) continue;
+      const m0 = pr.get(0), m1 = pr.get(1);
+      if (m0.distance < 0.8 * m1.distance) { const p = refPrep.kp.get(m0.queryIdx).pt, q = kp.get(m0.trainIdx).pt; a.push(p.x, p.y); b.push(q.x, q.y); }
+    }
+    if (a.length / 2 >= 12) {
+      const A = cv.matFromArray(a.length / 2, 1, cv.CV_32FC2, a), B = cv.matFromArray(b.length / 2, 1, cv.CV_32FC2, b), inl = new cv.Mat();
+      const H = cv.findHomography(A, B, cv.RANSAC, 4, inl);
+      let n = 0; for (let i = 0; i < inl.rows; i++) if (inl.data[i]) n++;
+      if (!H.empty() && n >= 20 && sane(H.data64F, refPrep.w, refPrep.h)) {
+        const out = new cv.Mat();
+        cv.warpPerspective(src, out, H, new cv.Size(refPrep.w, refPrep.h), cv.INTER_LINEAR | cv.WARP_INVERSE_MAP);
+        aligned = new ImageData(new Uint8ClampedArray(out.data), refPrep.w, refPrep.h);
+        const h = Array.from(H.data64F), w = refPrep.w, hh = refPrep.h; // 픽셀 → 정규 좌표로
+        Hn = hMapToNorm(h, w, hh); lastInl = n; ok = true; out.delete();
+      }
+      A.delete(); B.delete(); inl.delete(); H.delete();
+    }
+    bf.delete(); mm.delete();
+  }
+  src.delete(); gray.delete(); orb.delete(); kp.delete(); des.delete(); none.delete();
+  return ok;
+}
+function hMapToNorm(h, w, hh) { // S⁻¹·H·S, S = diag(w, hh, 1)
+  return [h[0], h[1] * hh / w, h[2] / w, h[3] * w / hh, h[4], h[5] / hh, h[6] * w, h[7] * hh, h[8]];
+}
+// 기준 사진으로 빈칸 기준을 다시 계산(네모 조정·칸 맞추기 뒤 — 보관함을 비울 필요 없음)
+function baseFromRef() {
+  if (!refImg) return false;
+  base = {}; regions.forEach(r => base[r.slot] = feat(refImg, refImg.width, refImg.height, r));
+  return true;
+}
+function camFlag(bad) { // 3번 연속(약 1분 반) 못 맞추면 경고·기록, 다시 맞으면 재개 기록
+  if (bad) {
+    camBad++;
+    if (camBad >= 3 && !camAlarm) { camAlarm = true; queue.push({t: Date.now(), slot: '카메라', state: '움직임 의심 — 감지 멈춤', score: 0}); saveLocal('nxq', queue); }
+    return camAlarm ? 'alarm' : 'skip';
+  }
+  camBad = 0;
+  if (camAlarm) { camAlarm = false; queue.push({t: Date.now(), slot: '카메라', state: '다시 맞음 — 감지 재개', score: 0}); saveLocal('nxq', queue); }
+  return 'ok';
+}
+
 /* ===== 검사 ===== */
 async function check() {
   lastCheck = Date.now();
   if (!regions.length) { msg('먼저 [칸 맞추기]를 해 주세요'); return; }
   if (!Object.keys(base).length) { msg('보관함이 비었을 때 [빈 보관함 기준 저장]을 눌러 주세요'); return; }
-  const g = grab(); if (!g) return;
+  let cam, useA = false;
+  if (CV && refPrep) { let ok = false; try { ok = align(); } catch (e) { ok = false; } cam = camFlag(!ok); useA = ok; }
+  else cam = await camCheck();
+  if (cam !== 'ok') {
+    await flush();
+    msg(cam === 'alarm' ? '⚠ 보관함이 안 보여요. 보관함 두 개가 화면에 다 들어오게 놓으면 저절로 다시 맞춰요' : '화면이 기준과 달라 이번 검사는 건너뛰었어요(가림 또는 움직임)', cam === 'alarm');
+    render(); return;
+  }
+  const g = useA ? null : grab(); if (!useA && !g) return;
   const feats = {}; let cs = 0, bs = 0;
   regions.forEach(r => {
-    const f = feat(g.img, g.W, g.H, r); feats[r.slot] = f;
+    const f = useA ? feat(aligned, aligned.width, aligned.height, r) : feat(g.img, g.W, g.H, sh(r)); feats[r.slot] = f;
     const b = base[r.slot]; if (b) for (let i = 0; i < f.length; i++) { cs += f[i]; bs += b[i]; }
   });
   const k = Math.min(1.6, Math.max(0.6, cs ? bs / cs : 1)); // 밝기 보정
@@ -296,17 +498,18 @@ function render() {
     const st = slotState[r.slot];
     const col = !st || st.s === null ? '#999' : st.p ? '#facc15' : st.s ? '#22c55e' : '#64748b';
     vctx.strokeStyle = col;
-    vctx.strokeRect(SX(r.x0), SY(r.y0), (r.x1 - r.x0) / Z.w * VW, (r.y1 - r.y0) / Z.w * VH);
+    const P = [[r.x0, r.y0], [r.x1, r.y0], [r.x1, r.y1], [r.x0, r.y1]].map(([x, y]) => toCur(x, y));
+    vctx.beginPath(); P.forEach(([x, y], i) => i ? vctx.lineTo(SX(x), SY(y)) : vctx.moveTo(SX(x), SY(y))); vctx.closePath(); vctx.stroke();
     vctx.fillStyle = col;
     const sc = lastScores[r.slot];
-    vctx.fillText(r.slot + (sc !== undefined ? ' ' + sc : ''), SX(r.x0), SY(r.y0) - 3);
+    vctx.fillText(r.slot + (sc !== undefined ? ' ' + sc : ''), SX(P[0][0]), SY(P[0][1]) - 3);
   });
   if (mode === 'cal') {
     vctx.fillStyle = '#f43f5e';
     calTmp.forEach(p => { vctx.beginPath(); vctx.arc(SX(p.x), SY(p.y), 6, 0, 7); vctx.fill(); });
   }
   const occ = Object.values(slotState).filter(s => s.s === 1).length;
-  $('stat').textContent = `마지막 검사 ${lastCheck ? hhmmss(lastCheck) : '-'} · 꽂힘 ${occ}칸 · 못 보낸 기록 ${queue.length}개 · 서버 ${serverOk === null ? '-' : serverOk ? '정상' : '연결 안 됨'}`;
+  $('stat').textContent = `마지막 검사 ${lastCheck ? hhmmss(lastCheck) : '-'} · 꽂힘 ${occ}칸 · 못 보낸 기록 ${queue.length}개 · 서버 ${serverOk === null ? '-' : serverOk ? '정상' : '연결 안 됨'} · 카메라 ${camAlarm ? '⚠ 움직임' : (CV && refPrep) ? (Hn ? '자동 맞춤(대조점 ' + lastInl + '개)' : '맞추는 중') : !anchor ? '기준 없음' : (off.x || off.y) ? '조금 밀림(보정 중)' : '제자리'}${CV ? '' : ' · 자동 맞춤 도구 불러오는 중'}`;
 }
 
 /* ===== 칸 맞추기 ===== */
@@ -329,7 +532,7 @@ view.addEventListener('pointerup', async e => {
   const d = down; down = null;
   if (!d || d.moved) return; // 끌어서 옮긴 건 누른 걸로 치지 않음
   const rect = view.getBoundingClientRect(), Z = viewWin();
-  const x = Z.x0 + (e.clientX - rect.left) / rect.width * Z.w, y = Z.y0 + (e.clientY - rect.top) / rect.height * Z.w;
+  const [x, y] = toRef(Z.x0 + (e.clientX - rect.left) / rect.width * Z.w, Z.y0 + (e.clientY - rect.top) / rect.height * Z.w);
   if (mode === 'cal') {
     calTmp.push({x, y}); calStep++;
     if (calStep >= activeRows().length * 2) {
@@ -339,16 +542,17 @@ view.addEventListener('pointerup', async e => {
         calib.push({x1: a.x, y1: a.y, x2: b.x, y2: b.y});
       }
       mode = ''; $('bCal').classList.remove('on'); calTmp = [];
-      computeRegions(); slotState = {}; prevFeat = {};
+      computeRegions(); slotState = {}; prevFeat = {}; lastScores = {};
+      const re = baseFromRef(); prepRef();
       await saveSettings();
-      msg('칸 맞추기 저장 완료. 네모가 각 칸 위(폰이 보이는 자리)에 있는지 확인하세요.');
+      msg(re ? '칸 맞추기 저장 완료. 빈칸 기준도 저장된 기준 사진으로 다시 계산했어요.' : '칸 맞추기 저장 완료. 네모가 칸 위(폰이 보이는 자리)에 맞으면, 보관함이 비었을 때 ② 빈 보관함 기준 저장을 눌러 주세요.');
     } else calPrompt();
     render();
   } else if (mode === 'one') {
     const r = regions.find(q => x >= q.x0 && x <= q.x1 && y >= q.y0 && y <= q.y1);
     if (!r) { msg('네모 안을 눌러 주세요'); return; }
-    const g = grab(); if (!g) return;
-    base[r.slot] = feat(g.img, g.W, g.H, r);
+    if (aligned && Hn) base[r.slot] = feat(aligned, aligned.width, aligned.height, r);
+    else { const g = grab(); if (!g) return; base[r.slot] = feat(g.img, g.W, g.H, sh(r)); }
     slotState[r.slot] = {s: 0, p: 0, pt: 0};
     mode = ''; $('bOne').classList.remove('on');
     await saveSettings();
@@ -365,8 +569,7 @@ $('bCal').onclick = () => {
 $('bBase').onclick = async () => {
   if (!regions.length) { msg('먼저 칸 맞추기를 해 주세요', true); return; }
   if (!confirm('보관함에 폰이 하나도 없을 때만 누르세요. 저장할까요?')) return;
-  const g = grab(); if (!g) return;
-  base = {}; regions.forEach(r => base[r.slot] = feat(g.img, g.W, g.H, r));
+  saveRef(); baseFromRef(); saveAnchor();
   slotState = {}; prevFeat = {};
   regions.forEach(r => slotState[r.slot] = {s: 0, p: 0, pt: 0});
   await saveSettings();
@@ -375,6 +578,7 @@ $('bBase').onclick = async () => {
 };
 $('bOne').onclick = () => { mode = mode === 'one' ? '' : 'one'; $('bOne').classList.toggle('on', mode === 'one'); msg(mode ? '지금 확실히 빈 칸의 네모를 누르세요' : '취소했어요'); };
 $('bNow').onclick = () => check();
+$('bMore').onclick = () => { const h = $('more').classList.toggle('hide'); $('bMore').textContent = h ? '설정 ▾' : '설정 ▴'; };
 // 가로 화면에서 버튼 줄이 카메라를 가리지 않게 접고 펴기(상태 기억)
 function setMenu(show) {
   $('bar').classList.toggle('hide', !show); $('stat').classList.toggle('hide', !show);
@@ -423,6 +627,7 @@ $('cam').onchange = e => startCam(e.target.value);
 let facing = (function(){ try { return localStorage.getItem('nxfacing') || 'environment'; } catch (e) { return 'environment'; } })();
 function afterTransform(t) {
   calib = null; regions = []; slotState = {}; prevFeat = {}; lastScores = {};
+  refImg = null; Hn = null; aligned = null; prepRef(); try { localStorage.removeItem('nxref_' + side); } catch (e) {}
   msg(t + ' 칸 위치가 바뀌니 번호표가 똑바로 보이면 [칸 맞추기]를 다시 해 주세요');
   render();
 }
@@ -473,6 +678,7 @@ document.addEventListener('visibilitychange', () => { if (document.visibilitySta
 /* ===== 시작 ===== */
 (async () => {
   askServerUrl();
+  loadCv();
   await loadSettings();
   await startCam(null);
   setInterval(check, INTERVAL);
