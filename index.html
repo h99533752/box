@@ -21,6 +21,7 @@
 <div id="bar">
   <button id="bStart">카메라 시작</button>
   <select id="cam"></select>
+  <select id="side"><option value="ALL">보관함 둘 다</option><option value="L">왼쪽만(25~111)</option><option value="R">오른쪽만(61~112)</option></select>
   <button id="bCal">칸 맞추기</button>
   <button id="bBase">빈 보관함 기준 저장</button>
   <button id="bOne">이 칸만 빈칸으로</button>
@@ -55,6 +56,8 @@ const ROWS = [
 ];
 
 /* ===== 상태 ===== */
+let side = (function(){ try { return localStorage.getItem('nxside') || 'ALL'; } catch (e) { return 'ALL'; } })();
+const activeRows = () => side === 'ALL' ? ROWS : ROWS.filter(r => r.box === side);
 const $ = id => document.getElementById(id);
 const v = $('v'), view = $('view'), vctx = view.getContext('2d');
 const work = document.createElement('canvas');
@@ -103,14 +106,14 @@ function decodeBase(str) { base = {}; if (!str) return; try { const o = JSON.par
 
 async function saveSettings() {
   const b = encodeBase();
-  saveLocal('nxset', {calib, base: b, thr});
-  try { await call({type: 'saveSettings', calib, base: b, threshold: thr}); serverOk = true; }
+  saveLocal('nxset_' + side, {calib, base: b, thr});
+  try { await call({type: 'saveSettings', calib, base: b, threshold: thr, side}); serverOk = true; }
   catch (e) { serverOk = false; }
 }
 async function loadSettings() {
   let s = null;
-  try { s = await call({type: 'loadSettings'}); } catch (e) {}
-  if (!s || !s.calib) { const l = loadLocal('nxset', null); if (l) s = {calib: l.calib, base: l.base, threshold: l.thr}; }
+  try { s = await call({type: 'loadSettings', side}); } catch (e) {}
+  if (!s || !s.calib) { const l = loadLocal('nxset_' + side, null); if (l) s = {calib: l.calib, base: l.base, threshold: l.thr}; }
   if (s) { calib = s.calib; decodeBase(s.base); if (s.threshold) thr = s.threshold; }
   $('thr').value = thr; $('thrv').textContent = thr;
   computeRegions();
@@ -119,8 +122,9 @@ async function loadSettings() {
 /* ===== 칸 위치 계산 ===== */
 function computeRegions() {
   regions = [];
-  if (!calib || calib.length !== ROWS.length) return;
-  const info = ROWS.map((r, i) => ({box: r.box, slots: r.slots, c: calib[i], y: (calib[i].y1 + calib[i].y2) / 2}));
+  const AR = activeRows();
+  if (!calib || calib.length !== AR.length) return;
+  const info = AR.map((r, i) => ({box: r.box, slots: r.slots, c: calib[i], y: (calib[i].y1 + calib[i].y2) / 2}));
   info.forEach(ri => {
     const same = info.filter(o => o.box === ri.box);
     const idx = same.indexOf(ri);
@@ -199,7 +203,7 @@ async function check() {
   const occ = Object.values(slotState).filter(s => s.s === 1).length;
   if (now - lastBeat > BEAT) {
     lastBeat = now;
-    try { await call({type: 'beat', occupied: occ}); serverOk = true; } catch (e) { serverOk = false; }
+    try { await call({type: 'beat', occupied: occ, side}); serverOk = true; } catch (e) { serverOk = false; }
   }
   msg(evs.length ? `바뀐 칸 ${evs.length}개 기록` : '감시 중');
   render();
@@ -243,18 +247,18 @@ function render() {
 /* ===== 칸 맞추기 ===== */
 function calPrompt() {
   const r = Math.floor(calStep / 2), first = calStep % 2 === 0;
-  const row = ROWS[r];
+  const row = activeRows()[r];
   const slot = first ? row.slots[0] : row.slots[row.slots.length - 1];
-  msg(`${row.box === 'L' ? '왼쪽' : '오른쪽'} 보관함 ${slot}번 번호표 가운데를 누르세요 (${calStep + 1}/${ROWS.length * 2})`);
+  msg(`${row.box === 'L' ? '왼쪽' : '오른쪽'} 보관함 ${slot}번 번호표 가운데를 누르세요 (${calStep + 1}/${activeRows().length * 2})`);
 }
 view.addEventListener('pointerdown', async e => {
   const rect = view.getBoundingClientRect();
   const x = (e.clientX - rect.left) / rect.width, y = (e.clientY - rect.top) / rect.height;
   if (mode === 'cal') {
     calTmp.push({x, y}); calStep++;
-    if (calStep >= ROWS.length * 2) {
+    if (calStep >= activeRows().length * 2) {
       calib = [];
-      for (let i = 0; i < ROWS.length; i++) {
+      for (let i = 0; i < activeRows().length; i++) {
         const a = calTmp[i * 2], b = calTmp[i * 2 + 1];
         calib.push({x1: a.x, y1: a.y, x2: b.x, y2: b.y});
       }
@@ -310,14 +314,25 @@ $('thr').oninput = e => {
 };
 $('bStart').onclick = () => startCam($('cam').value || null);
 $('cam').onchange = e => startCam(e.target.value);
+$('side').value = side;
+$('side').onchange = async e => {
+  side = e.target.value;
+  try { localStorage.setItem('nxside', side); } catch (err) {}
+  calib = null; base = {}; regions = []; slotState = {}; prevFeat = {}; lastScores = {};
+  await loadSettings();
+  msg(regions.length ? '이 기기가 맡은 보관함 설정을 불러왔어요' : '이 기기가 맡을 보관함의 [칸 맞추기]를 해 주세요');
+  render();
+};
 
 /* ===== 카메라 ===== */
 async function startCam(deviceId) {
   try {
     if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) throw new Error('mediaDevices 없음');
     if (stream) stream.getTracks().forEach(t => t.stop());
-    const video = deviceId ? {deviceId: {exact: deviceId}, width: {ideal: 1920}, height: {ideal: 1080}}
-                           : {facingMode: {ideal: 'environment'}, width: {ideal: 1920}, height: {ideal: 1080}};
+    // 4:3 큰 해상도로 요청 → 동영상용 16:9보다 센서를 넓게 써서 카메라 앱 사진 화면에 가깝게 보임
+    const size = {width: {ideal: 2560}, height: {ideal: 1920}, aspectRatio: {ideal: 4 / 3}};
+    const video = deviceId ? Object.assign({deviceId: {exact: deviceId}}, size)
+                           : Object.assign({facingMode: {ideal: 'environment'}}, size);
     stream = await navigator.mediaDevices.getUserMedia({video, audio: false});
     v.srcObject = stream; await v.play();
     const devs = (await navigator.mediaDevices.enumerateDevices()).filter(d => d.kind === 'videoinput');
