@@ -5,19 +5,22 @@
 <meta charset="utf-8">
 <style>
   body{margin:0;font-family:-apple-system,"Malgun Gothic",sans-serif;background:#111;color:#eee}
-  #bar{display:flex;flex-wrap:wrap;gap:6px;padding:8px;background:#222;position:sticky;top:0;z-index:2}
+  #bar{display:flex;flex-wrap:wrap;gap:6px;padding:8px;background:#222}
+  #bar.hide,#stat.hide{display:none}
+  #bMenu{position:fixed;top:6px;right:6px;z-index:5;background:#2563eb;opacity:.85}
   button,select{font-size:15px;padding:9px 11px;border-radius:8px;border:0;background:#3a3a3a;color:#fff}
   button.on{background:#2563eb}
   #msg{padding:10px;font-size:17px;background:#1d3557;line-height:1.4}
   #msg.err{background:#7f1d1d}
   #stat{padding:6px 8px;font-size:13px;color:#bbb}
-  canvas{width:100%;display:block;touch-action:none}
+  canvas{display:block;margin:0 auto;max-width:100%;max-height:86vh;width:auto;height:auto;touch-action:none}
   label{font-size:14px;display:flex;align-items:center;gap:4px}
   video{position:absolute;width:1px;height:1px;opacity:0}
   #dim{display:none;position:fixed;inset:0;background:#000;z-index:9;color:#333;font-size:12px;align-items:flex-end;justify-content:center;padding-bottom:20px}
 </style>
 </head>
 <body>
+<button id="bMenu">메뉴 숨기기</button>
 <div id="bar">
   <button id="bStart">카메라 시작</button>
   <select id="cam"></select>
@@ -320,6 +323,14 @@ $('bBase').onclick = async () => {
 };
 $('bOne').onclick = () => { mode = mode === 'one' ? '' : 'one'; $('bOne').classList.toggle('on', mode === 'one'); msg(mode ? '지금 확실히 빈 칸의 네모를 누르세요' : '취소했어요'); };
 $('bNow').onclick = () => check();
+// 가로 화면에서 버튼 줄이 카메라를 가리지 않게 접고 펴기(상태 기억)
+function setMenu(show) {
+  $('bar').classList.toggle('hide', !show); $('stat').classList.toggle('hide', !show);
+  $('bMenu').textContent = show ? '메뉴 숨기기' : '메뉴';
+  try { localStorage.setItem('nxmenu', show ? '1' : '0'); } catch (e) {}
+}
+$('bMenu').onclick = () => setMenu($('bar').classList.contains('hide'));
+setMenu((function(){ try { return localStorage.getItem('nxmenu') !== '0'; } catch (e) { return true; } })());
 // AMOLED(노트9) 번인 방지: 검은 화면으로 가려도 카메라·검사는 계속 돈다
 let dimmed = false;
 function setDim(on) { dimmed = on; $('dim').style.display = on ? 'flex' : 'none'; }
