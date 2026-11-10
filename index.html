@@ -22,6 +22,8 @@
   <button id="bStart">카메라 시작</button>
   <select id="cam"></select>
   <button id="bFlip">앞/뒤 카메라 전환</button>
+  <button id="bRot">화면 90° 돌리기</button>
+  <button id="bMir">좌우 뒤집기</button>
   <select id="side"><option value="ALL">보관함 둘 다</option><option value="L">왼쪽만(25~111)</option><option value="R">오른쪽만(61~112)</option></select>
   <button id="bCal">칸 맞추기</button>
   <button id="bBase">빈 보관함 기준 저장</button>
@@ -142,11 +144,29 @@ function computeRegions() {
 }
 
 /* ===== 화면 잡기·특징 뽑기 ===== */
-function grab() {
+// 화면 돌리기·좌우 뒤집기: 검사용 그림과 보이는 그림에 똑같이 적용 → 칸 위치가 어긋나지 않음
+let rot = (function(){ try { return +localStorage.getItem('nxrot') || 0; } catch (e) { return 0; } })();
+let flipX = (function(){ try { return localStorage.getItem('nxmir') === '1'; } catch (e) { return false; } })();
+function frameSize() {
   const W = v.videoWidth, H = v.videoHeight;
-  if (!W) return null;
+  return rot % 180 ? [H, W] : [W, H];
+}
+function drawFrame(ctx, outW, outH) {
+  const W = v.videoWidth, H = v.videoHeight;
+  ctx.save();
+  ctx.translate(outW / 2, outH / 2);
+  if (flipX) ctx.scale(-1, 1);
+  ctx.rotate(rot * Math.PI / 180);
+  const s = rot % 180 ? outW / H : outW / W;
+  ctx.scale(s, s);
+  ctx.drawImage(v, -W / 2, -H / 2, W, H);
+  ctx.restore();
+}
+function grab() {
+  if (!v.videoWidth) return null;
+  const [W, H] = frameSize();
   work.width = W; work.height = H;
-  wctx.drawImage(v, 0, 0, W, H);
+  drawFrame(wctx, W, H);
   return {img: wctx.getImageData(0, 0, W, H), W, H};
 }
 function feat(img, W, H, r) {
@@ -220,11 +240,11 @@ async function flush() {
 
 /* ===== 그리기 ===== */
 function render() {
-  const W = v.videoWidth, H = v.videoHeight;
-  if (W) {
-    const s = Math.min(1, 1280 / W);
+  if (v.videoWidth) {
+    const [W, H] = frameSize();
+    const s = Math.min(1, 1280 / Math.max(W, H));
     view.width = Math.round(W * s); view.height = Math.round(H * s);
-    vctx.drawImage(v, 0, 0, view.width, view.height);
+    drawFrame(vctx, view.width, view.height);
   }
   const VW = view.width, VH = view.height;
   vctx.lineWidth = 2; vctx.font = 'bold 13px sans-serif';
@@ -317,6 +337,13 @@ $('bStart').onclick = () => startCam($('cam').value || null);
 $('cam').onchange = e => startCam(e.target.value);
 // 앞/뒤 카메라 전환(전면이 더 넓게 보이는 기기도 있음). 고른 방향은 이 기기에 기억
 let facing = (function(){ try { return localStorage.getItem('nxfacing') || 'environment'; } catch (e) { return 'environment'; } })();
+function afterTransform(t) {
+  calib = null; regions = []; slotState = {}; prevFeat = {}; lastScores = {};
+  msg(t + ' 칸 위치가 바뀌니 번호표가 똑바로 보이면 [칸 맞추기]를 다시 해 주세요');
+  render();
+}
+$('bRot').onclick = () => { rot = (rot + 90) % 360; try { localStorage.setItem('nxrot', rot); } catch (e) {} afterTransform('화면을 ' + rot + '° 돌렸어요.'); };
+$('bMir').onclick = () => { flipX = !flipX; try { localStorage.setItem('nxmir', flipX ? '1' : '0'); } catch (e) {} afterTransform('좌우를 뒤집었어요.'); };
 $('bFlip').onclick = () => {
   facing = facing === 'environment' ? 'user' : 'environment';
   try { localStorage.setItem('nxfacing', facing); } catch (e) {}
