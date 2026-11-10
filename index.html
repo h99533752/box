@@ -41,6 +41,10 @@
   <button id="bCal">칸 맞추기</button>
   <button id="bBase">빈 보관함 기준 저장</button>
   <button id="bOne">이 칸만 빈칸으로</button>
+  <span style="display:flex;gap:4px;align-items:center;font-size:13px">네모 조정
+    <button id="gUp">위로</button><button id="gDn">아래로</button>
+    <button id="gTall">길게</button><button id="gShort">짧게</button>
+    <button id="gWide">넓게</button><button id="gNarrow">좁게</button></span>
   <button id="bNow">지금 검사</button>
   <button id="bDim">화면 검게(번인 방지)</button>
   <label>민감도 <input id="thr" type="range" min="5" max="60" value="20"><span id="thrv">20</span>%</label>
@@ -136,6 +140,17 @@ async function loadSettings() {
 }
 
 /* ===== 칸 위치 계산 ===== */
+// 네모 모양(번호표 기준 위로 얼마나·폭 얼마나) — [네모 조정] 버튼으로 바꾸고 이 기기에 기억
+let geom = Object.assign({top: 0.82, bot: 0.12, w: 0.32, dy: 0}, (function(){ try { return JSON.parse(localStorage.getItem('nxgeom')) || {}; } catch (e) { return {}; } })());
+function adjGeom(k, d) {
+  geom[k] = Math.round((geom[k] + d) * 100) / 100;
+  if (geom.top < geom.bot + 0.15) geom.top = geom.bot + 0.15;
+  geom.w = Math.max(0.1, Math.min(0.5, geom.w));
+  try { localStorage.setItem('nxgeom', JSON.stringify(geom)); } catch (e) {}
+  computeRegions(); slotState = {}; prevFeat = {}; lastScores = {};
+  msg('네모를 조정했어요. 다 맞추면 보관함이 비었을 때 [빈 보관함 기준 저장]을 다시 눌러 주세요');
+  render();
+}
 function computeRegions() {
   regions = [];
   const AR = activeRows();
@@ -151,7 +166,7 @@ function computeRegions() {
       const t = n > 1 ? k / (n - 1) : 0;
       const x = ri.c.x1 + (ri.c.x2 - ri.c.x1) * t;
       const y = ri.c.y1 + (ri.c.y2 - ri.c.y1) * t;
-      regions.push({slot: s, x0: x - sp * 0.32, x1: x + sp * 0.32, y0: y - gap * 0.82, y1: y - gap * 0.12});
+      regions.push({slot: s, x0: x - sp * geom.w, x1: x + sp * geom.w, y0: y - gap * (geom.top - geom.dy), y1: y - gap * (geom.bot - geom.dy)});
     });
   });
 }
@@ -376,6 +391,12 @@ async function goFull() {
   } catch (e) { msg('이 브라우저는 전체 화면을 막았어요: ' + (e.message || e)); }
 }
 $('bFull').onclick = goFull;
+$('gUp').onclick = () => adjGeom('dy', 0.05);
+$('gDn').onclick = () => adjGeom('dy', -0.05);
+$('gTall').onclick = () => adjGeom('top', 0.05);
+$('gShort').onclick = () => adjGeom('top', -0.05);
+$('gWide').onclick = () => adjGeom('w', 0.03);
+$('gNarrow').onclick = () => adjGeom('w', -0.03);
 $('zIn').onclick = () => setZoom(vz + 1);
 $('zOut').onclick = () => setZoom(vz - 1);
 document.addEventListener('pointerdown', () => {
