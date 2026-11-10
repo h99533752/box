@@ -1,0 +1,349 @@
+<!DOCTYPE html>
+<html>
+<head>
+<base target="_top">
+<meta charset="utf-8">
+<style>
+  body{margin:0;font-family:-apple-system,"Malgun Gothic",sans-serif;background:#111;color:#eee}
+  #bar{display:flex;flex-wrap:wrap;gap:6px;padding:8px;background:#222;position:sticky;top:0;z-index:2}
+  button,select{font-size:15px;padding:9px 11px;border-radius:8px;border:0;background:#3a3a3a;color:#fff}
+  button.on{background:#2563eb}
+  #msg{padding:10px;font-size:17px;background:#1d3557;line-height:1.4}
+  #msg.err{background:#7f1d1d}
+  #stat{padding:6px 8px;font-size:13px;color:#bbb}
+  canvas{width:100%;display:block;touch-action:none}
+  label{font-size:14px;display:flex;align-items:center;gap:4px}
+  video{position:absolute;width:1px;height:1px;opacity:0}
+  #dim{display:none;position:fixed;inset:0;background:#000;z-index:9;color:#333;font-size:12px;align-items:flex-end;justify-content:center;padding-bottom:20px}
+</style>
+</head>
+<body>
+<div id="bar">
+  <button id="bStart">카메라 시작</button>
+  <select id="cam"></select>
+  <button id="bCal">칸 맞추기</button>
+  <button id="bBase">빈 보관함 기준 저장</button>
+  <button id="bOne">이 칸만 빈칸으로</button>
+  <button id="bNow">지금 검사</button>
+  <button id="bDim">화면 검게(번인 방지)</button>
+  <label>민감도 <input id="thr" type="range" min="5" max="60" value="20"><span id="thrv">20</span>%</label>
+</div>
+<div id="msg">① 카메라 시작 → ② 칸 맞추기(처음 한 번) → ③ 보관함이 비었을 때 '빈 보관함 기준 저장'</div>
+<div id="stat"></div>
+<canvas id="view"></canvas>
+<video id="v" playsinline muted autoplay></video>
+<div id="dim">감시 중 · 화면을 누르면 다시 보여요</div>
+
+<script>
+/* ===== 설정 ===== */
+const WEBAPP_URL = '';            // 페이지를 앱스 스크립트 밖에 올릴 때만 웹 앱 주소를 넣음
+const KEY = 'nx-box-0911';
+const INTERVAL = 30000;           // 30초마다 검사(2번 연속 같아야 기록 → 약 1분 안쪽)
+const BEAT = 300000;              // 5분마다 살아 있다는 신호
+const GRID_W = 8, GRID_H = 16, DIFF = 30;
+const range = (a, b) => Array.from({length: b - a + 1}, (_, i) => a + i);
+// 보관함 줄 구성(사진 11/8 기준). 칸 번호가 바뀌면 여기만 고친다.
+const ROWS = [
+  {box: 'L', slots: range(25, 36)},
+  {box: 'L', slots: range(37, 48)},
+  {box: 'L', slots: [...range(50, 60), 109]},
+  {box: 'L', slots: [110, 111]},
+  {box: 'R', slots: range(61, 72)},
+  {box: 'R', slots: range(73, 84)},
+  {box: 'R', slots: range(85, 96)},
+  {box: 'R', slots: [...range(97, 103), 112, ...range(105, 108)]},
+];
+
+/* ===== 상태 ===== */
+const $ = id => document.getElementById(id);
+const v = $('v'), view = $('view'), vctx = view.getContext('2d');
+const work = document.createElement('canvas');
+const wctx = work.getContext('2d', {willReadFrequently: true});
+let calib = null, base = {}, thr = 20, regions = [];
+let slotState = {}, lastScores = {}, prevFeat = {};
+let mode = '', calStep = 0, calTmp = [];
+let queue = loadLocal('nxq', []);
+let lastCheck = 0, lastBeat = 0, serverOk = null, stream = null, wakeLock = null;
+
+function loadLocal(k, d) { try { return JSON.parse(localStorage.getItem(k)) || d; } catch (e) { return d; } }
+function saveLocal(k, val) { try { localStorage.setItem(k, JSON.stringify(val)); } catch (e) {} }
+function msg(t, err) { $('msg').textContent = t; $('msg').className = err ? 'err' : ''; }
+const hhmmss = ms => new Date(ms).toLocaleTimeString('ko-KR', {hour12: false});
+
+/* ===== 서버 호출 ===== */
+// 앱스 스크립트 밖(공기계에 저장한 파일 등)에서 열면 웹 앱 주소(…/exec)를 한 번 물어보고 기억한다
+function serverUrl() {
+  if (WEBAPP_URL) return WEBAPP_URL;
+  let u = '';
+  try { u = localStorage.getItem('nxurl') || ''; } catch (e) {}
+  return u;
+}
+function askServerUrl() {
+  if (window.google && google.script && google.script.run) return;
+  if (serverUrl()) return;
+  const u = (prompt('보관함 감시 웹 앱 주소(…/exec)를 붙여 넣어 주세요') || '').trim();
+  if (u) { try { localStorage.setItem('nxurl', u); } catch (e) {} }
+}
+function call(payload) {
+  return new Promise((res, rej) => {
+    if (window.google && google.script && google.script.run) {
+      google.script.run.withSuccessHandler(res).withFailureHandler(rej).api(payload);
+    } else if (serverUrl()) {
+      fetch(serverUrl(), {method: 'POST', body: JSON.stringify(Object.assign({key: KEY}, payload))})
+        .then(r => r.json()).then(res, rej);
+    } else rej(new Error('no server'));
+  });
+}
+
+/* ===== 기준값 인코딩 ===== */
+const toHex = f => Array.from(f, b => b.toString(16).padStart(2, '0')).join('');
+const fromHex = h => { const a = new Uint8Array(h.length / 2); for (let i = 0; i < a.length; i++) a[i] = parseInt(h.substr(i * 2, 2), 16); return a; };
+function encodeBase() { const o = {}; for (const s in base) o[s] = toHex(base[s]); return JSON.stringify(o); }
+function decodeBase(str) { base = {}; if (!str) return; try { const o = JSON.parse(str); for (const s in o) base[s] = fromHex(o[s]); } catch (e) {} }
+
+async function saveSettings() {
+  const b = encodeBase();
+  saveLocal('nxset', {calib, base: b, thr});
+  try { await call({type: 'saveSettings', calib, base: b, threshold: thr}); serverOk = true; }
+  catch (e) { serverOk = false; }
+}
+async function loadSettings() {
+  let s = null;
+  try { s = await call({type: 'loadSettings'}); } catch (e) {}
+  if (!s || !s.calib) { const l = loadLocal('nxset', null); if (l) s = {calib: l.calib, base: l.base, threshold: l.thr}; }
+  if (s) { calib = s.calib; decodeBase(s.base); if (s.threshold) thr = s.threshold; }
+  $('thr').value = thr; $('thrv').textContent = thr;
+  computeRegions();
+}
+
+/* ===== 칸 위치 계산 ===== */
+function computeRegions() {
+  regions = [];
+  if (!calib || calib.length !== ROWS.length) return;
+  const info = ROWS.map((r, i) => ({box: r.box, slots: r.slots, c: calib[i], y: (calib[i].y1 + calib[i].y2) / 2}));
+  info.forEach(ri => {
+    const same = info.filter(o => o.box === ri.box);
+    const idx = same.indexOf(ri);
+    const gap = idx > 0 ? ri.y - same[idx - 1].y : (same[idx + 1] ? same[idx + 1].y - ri.y : 0.1);
+    const n = ri.slots.length;
+    const sp = n > 1 ? (ri.c.x2 - ri.c.x1) / (n - 1) : 0.03;
+    ri.slots.forEach((s, k) => {
+      const t = n > 1 ? k / (n - 1) : 0;
+      const x = ri.c.x1 + (ri.c.x2 - ri.c.x1) * t;
+      const y = ri.c.y1 + (ri.c.y2 - ri.c.y1) * t;
+      regions.push({slot: s, x0: x - sp * 0.32, x1: x + sp * 0.32, y0: y - gap * 0.82, y1: y - gap * 0.12});
+    });
+  });
+}
+
+/* ===== 화면 잡기·특징 뽑기 ===== */
+function grab() {
+  const W = v.videoWidth, H = v.videoHeight;
+  if (!W) return null;
+  work.width = W; work.height = H;
+  wctx.drawImage(v, 0, 0, W, H);
+  return {img: wctx.getImageData(0, 0, W, H), W, H};
+}
+function feat(img, W, H, r) {
+  const out = new Uint8Array(GRID_W * GRID_H), d = img.data;
+  const X0 = r.x0 * W, X1 = r.x1 * W, Y0 = r.y0 * H, Y1 = r.y1 * H;
+  const cw = (X1 - X0) / GRID_W, ch = (Y1 - Y0) / GRID_H;
+  for (let gy = 0; gy < GRID_H; gy++) for (let gx = 0; gx < GRID_W; gx++) {
+    let sum = 0, c = 0;
+    const xs = Math.max(0, Math.floor(X0 + gx * cw)), xe = Math.min(W, Math.floor(X0 + (gx + 1) * cw));
+    const ys = Math.max(0, Math.floor(Y0 + gy * ch)), ye = Math.min(H, Math.floor(Y0 + (gy + 1) * ch));
+    for (let y = ys; y < ye; y += 2) for (let x = xs; x < xe; x += 2) {
+      const p = (y * W + x) * 4; sum += d[p] * 0.299 + d[p + 1] * 0.587 + d[p + 2] * 0.114; c++;
+    }
+    out[gy * GRID_W + gx] = c ? Math.round(sum / c) : 0;
+  }
+  return out;
+}
+function fracDiff(a, b, k) { let n = 0; for (let i = 0; i < a.length; i++) if (Math.abs(a[i] * k - b[i]) > DIFF) n++; return n / a.length; }
+
+/* ===== 검사 ===== */
+async function check() {
+  lastCheck = Date.now();
+  if (!regions.length) { msg('먼저 [칸 맞추기]를 해 주세요'); return; }
+  if (!Object.keys(base).length) { msg('보관함이 비었을 때 [빈 보관함 기준 저장]을 눌러 주세요'); return; }
+  const g = grab(); if (!g) return;
+  const feats = {}; let cs = 0, bs = 0;
+  regions.forEach(r => {
+    const f = feat(g.img, g.W, g.H, r); feats[r.slot] = f;
+    const b = base[r.slot]; if (b) for (let i = 0; i < f.length; i++) { cs += f[i]; bs += b[i]; }
+  });
+  const k = Math.min(1.6, Math.max(0.6, cs ? bs / cs : 1)); // 밝기 보정
+
+  // 사람이 앞을 가리면 한 번에 많은 칸이 바뀜 → 이번 검사는 건너뜀
+  let moved = 0, tot = 0;
+  regions.forEach(r => { const p = prevFeat[r.slot]; if (p) { tot++; if (fracDiff(feats[r.slot], p, 1) > 0.35) moved++; } });
+  prevFeat = feats;
+  if (tot && moved / tot > 0.3) { msg('앞이 가려져서 이번 검사는 건너뛰었어요'); render(); return; }
+
+  const now = Date.now(), evs = [];
+  regions.forEach(r => {
+    const b = base[r.slot]; if (!b) return;
+    const sc = Math.round(fracDiff(feats[r.slot], b, k) * 100);
+    lastScores[r.slot] = sc;
+    const nw = sc >= thr ? 1 : 0;
+    const st = slotState[r.slot] || (slotState[r.slot] = {s: null, p: 0, pt: 0});
+    if (st.s === null) { st.s = nw; if (nw === 1) evs.push({t: now, slot: r.slot, state: 2, score: sc}); return; }
+    if (nw !== st.s) {
+      if (st.p === 0) st.pt = now;
+      st.p++;
+      if (st.p >= 2) { st.s = nw; st.p = 0; evs.push({t: st.pt, slot: r.slot, state: nw, score: sc}); }
+    } else st.p = 0;
+  });
+  if (evs.length) { queue.push(...evs); saveLocal('nxq', queue); }
+  await flush();
+  const occ = Object.values(slotState).filter(s => s.s === 1).length;
+  if (now - lastBeat > BEAT) {
+    lastBeat = now;
+    try { await call({type: 'beat', occupied: occ}); serverOk = true; } catch (e) { serverOk = false; }
+  }
+  msg(evs.length ? `바뀐 칸 ${evs.length}개 기록` : '감시 중');
+  render();
+}
+async function flush() {
+  if (!queue.length) return;
+  const batch = queue.slice(0, 200);
+  try {
+    const r = await call({type: 'events', events: batch});
+    if (r && r.ok) { queue.splice(0, batch.length); saveLocal('nxq', queue); serverOk = true; } else serverOk = false;
+  } catch (e) { serverOk = false; }
+}
+
+/* ===== 그리기 ===== */
+function render() {
+  const W = v.videoWidth, H = v.videoHeight;
+  if (W) {
+    const s = Math.min(1, 1280 / W);
+    view.width = Math.round(W * s); view.height = Math.round(H * s);
+    vctx.drawImage(v, 0, 0, view.width, view.height);
+  }
+  const VW = view.width, VH = view.height;
+  vctx.lineWidth = 2; vctx.font = 'bold 13px sans-serif';
+  regions.forEach(r => {
+    const st = slotState[r.slot];
+    const col = !st || st.s === null ? '#999' : st.p ? '#facc15' : st.s ? '#22c55e' : '#64748b';
+    vctx.strokeStyle = col;
+    vctx.strokeRect(r.x0 * VW, r.y0 * VH, (r.x1 - r.x0) * VW, (r.y1 - r.y0) * VH);
+    vctx.fillStyle = col;
+    const sc = lastScores[r.slot];
+    vctx.fillText(r.slot + (sc !== undefined ? ' ' + sc : ''), r.x0 * VW, r.y0 * VH - 3);
+  });
+  if (mode === 'cal') {
+    vctx.fillStyle = '#f43f5e';
+    calTmp.forEach(p => { vctx.beginPath(); vctx.arc(p.x * VW, p.y * VH, 6, 0, 7); vctx.fill(); });
+  }
+  const occ = Object.values(slotState).filter(s => s.s === 1).length;
+  $('stat').textContent = `마지막 검사 ${lastCheck ? hhmmss(lastCheck) : '-'} · 꽂힘 ${occ}칸 · 못 보낸 기록 ${queue.length}개 · 서버 ${serverOk === null ? '-' : serverOk ? '정상' : '연결 안 됨'}`;
+}
+
+/* ===== 칸 맞추기 ===== */
+function calPrompt() {
+  const r = Math.floor(calStep / 2), first = calStep % 2 === 0;
+  const row = ROWS[r];
+  const slot = first ? row.slots[0] : row.slots[row.slots.length - 1];
+  msg(`${row.box === 'L' ? '왼쪽' : '오른쪽'} 보관함 ${slot}번 번호표 가운데를 누르세요 (${calStep + 1}/${ROWS.length * 2})`);
+}
+view.addEventListener('pointerdown', async e => {
+  const rect = view.getBoundingClientRect();
+  const x = (e.clientX - rect.left) / rect.width, y = (e.clientY - rect.top) / rect.height;
+  if (mode === 'cal') {
+    calTmp.push({x, y}); calStep++;
+    if (calStep >= ROWS.length * 2) {
+      calib = [];
+      for (let i = 0; i < ROWS.length; i++) {
+        const a = calTmp[i * 2], b = calTmp[i * 2 + 1];
+        calib.push({x1: a.x, y1: a.y, x2: b.x, y2: b.y});
+      }
+      mode = ''; $('bCal').classList.remove('on'); calTmp = [];
+      computeRegions(); slotState = {}; prevFeat = {};
+      await saveSettings();
+      msg('칸 맞추기 저장 완료. 네모가 각 칸 위(폰이 보이는 자리)에 있는지 확인하세요.');
+    } else calPrompt();
+    render();
+  } else if (mode === 'one') {
+    const r = regions.find(q => x >= q.x0 && x <= q.x1 && y >= q.y0 && y <= q.y1);
+    if (!r) { msg('네모 안을 눌러 주세요'); return; }
+    const g = grab(); if (!g) return;
+    base[r.slot] = feat(g.img, g.W, g.H, r);
+    slotState[r.slot] = {s: 0, p: 0, pt: 0};
+    mode = ''; $('bOne').classList.remove('on');
+    await saveSettings();
+    msg(`${r.slot}번 칸을 빈칸 기준으로 저장했어요`);
+    render();
+  }
+});
+
+/* ===== 버튼 ===== */
+$('bCal').onclick = () => {
+  if (!v.videoWidth) { msg('먼저 카메라를 시작해 주세요', true); return; }
+  mode = 'cal'; calStep = 0; calTmp = []; $('bCal').classList.add('on'); calPrompt(); render();
+};
+$('bBase').onclick = async () => {
+  if (!regions.length) { msg('먼저 칸 맞추기를 해 주세요', true); return; }
+  if (!confirm('보관함에 폰이 하나도 없을 때만 누르세요. 저장할까요?')) return;
+  const g = grab(); if (!g) return;
+  base = {}; regions.forEach(r => base[r.slot] = feat(g.img, g.W, g.H, r));
+  slotState = {}; prevFeat = {};
+  regions.forEach(r => slotState[r.slot] = {s: 0, p: 0, pt: 0});
+  await saveSettings();
+  msg('빈 보관함 기준 저장 완료. 이제 30초마다 검사해요.');
+  render();
+};
+$('bOne').onclick = () => { mode = mode === 'one' ? '' : 'one'; $('bOne').classList.toggle('on', mode === 'one'); msg(mode ? '지금 확실히 빈 칸의 네모를 누르세요' : '취소했어요'); };
+$('bNow').onclick = () => check();
+// AMOLED(노트9) 번인 방지: 검은 화면으로 가려도 카메라·검사는 계속 돈다
+let dimmed = false;
+function setDim(on) { dimmed = on; $('dim').style.display = on ? 'flex' : 'none'; }
+$('bDim').onclick = () => setDim(true);
+$('dim').onclick = () => setDim(false);
+let idleTimer = null;
+function armIdle() { clearTimeout(idleTimer); idleTimer = setTimeout(() => { if (mode === '') setDim(true); }, 180000); }
+document.addEventListener('pointerdown', armIdle);
+let thrTimer = null;
+$('thr').oninput = e => {
+  thr = +e.target.value; $('thrv').textContent = thr;
+  clearTimeout(thrTimer); thrTimer = setTimeout(saveSettings, 1500);
+};
+$('bStart').onclick = () => startCam($('cam').value || null);
+$('cam').onchange = e => startCam(e.target.value);
+
+/* ===== 카메라 ===== */
+async function startCam(deviceId) {
+  try {
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) throw new Error('mediaDevices 없음');
+    if (stream) stream.getTracks().forEach(t => t.stop());
+    const video = deviceId ? {deviceId: {exact: deviceId}, width: {ideal: 1920}, height: {ideal: 1080}}
+                           : {facingMode: {ideal: 'environment'}, width: {ideal: 1920}, height: {ideal: 1080}};
+    stream = await navigator.mediaDevices.getUserMedia({video, audio: false});
+    v.srcObject = stream; await v.play();
+    const devs = (await navigator.mediaDevices.enumerateDevices()).filter(d => d.kind === 'videoinput');
+    const cur = stream.getVideoTracks()[0].getSettings().deviceId;
+    $('cam').innerHTML = devs.map((d, i) => `<option value="${d.deviceId}" ${d.deviceId === cur ? 'selected' : ''}>${d.label || '카메라 ' + (i + 1)}</option>`).join('');
+    keepAwake();
+    msg(`카메라 연결됨 (${v.videoWidth}×${v.videoHeight}). ${regions.length ? '감시 중' : '[칸 맞추기]를 해 주세요'}`);
+    render();
+  } catch (e) {
+    msg('이 화면에서는 카메라를 쓸 수 없어요: ' + (e.name || '') + ' ' + (e.message || e) + ' — 이 문구를 Claude에게 알려 주세요', true);
+  }
+}
+async function keepAwake() {
+  try { if ('wakeLock' in navigator) wakeLock = await navigator.wakeLock.request('screen'); } catch (e) {}
+}
+document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') keepAwake(); });
+
+/* ===== 시작 ===== */
+(async () => {
+  askServerUrl();
+  await loadSettings();
+  await startCam(null);
+  setInterval(check, INTERVAL);
+  setInterval(() => { if (mode !== 'cal' && !dimmed) render(); }, 1000);
+  armIdle(); // 3분 동안 손대지 않으면 자동으로 검은 화면
+})();
+</script>
+</body>
+</html>
