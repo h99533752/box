@@ -132,9 +132,11 @@ async function saveSettings() {
   catch (e) { serverOk = false; }
 }
 async function loadSettings() {
+  // 이 기기에 저장된 설정을 먼저 쓰고(가장 최신), 없을 때만 시트에서 불러옴
   let s = null;
-  try { s = await call({type: 'loadSettings', side}); } catch (e) {}
-  if (!s || !s.calib) { const l = loadLocal('nxset_' + side, null); if (l) s = {calib: l.calib, base: l.base, threshold: l.thr}; }
+  const l = loadLocal('nxset_' + side, null);
+  if (l && l.calib) s = {calib: l.calib, base: l.base, threshold: l.thr};
+  else { try { s = await call({type: 'loadSettings', side}); } catch (e) {} }
   if (s) { calib = s.calib; decodeBase(s.base); if (s.threshold) thr = s.threshold; }
   anchor = loadLocal('nxanchor_' + side, null); off = {x: 0, y: 0}; camBad = 0; camAlarm = false;
   computeRegions(); await loadRef();
