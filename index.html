@@ -483,6 +483,7 @@ function findLabels(id) {
     }
     fixed.push(cur);
   });
+  window.__rows = fixed.filter(c => c.length >= 3).map(c => c.length);
   chains = fixed.filter(c => c.length >= 8 && c.length <= 14);
   const need = side === 'ALL' ? 8 : 4;
   if (chains.length < need) return {ok: false, msg: `번호표 줄을 ${chains.length}줄만 찾았어요(필요 ${need}줄). 보관함이 화면에 크게, 다 보이게 놓고 다시 해 주세요`};
@@ -707,17 +708,20 @@ $('bBase').onclick = async () => {
   msg('빈 보관함 기준 저장 완료. 이제 30초마다 검사해요.');
   render();
 };
+// 영점 결과를 시트에도 남겨 Claude가 멀리서 확인할 수 있게
+async function zeroLog(t) { queue.push({t: Date.now(), slot: '영점', state: t, score: 0}); saveLocal('nxq', queue); await flush(); }
 $('bZero').onclick = async () => {
-  const bad = frameOk(); if (bad) { msg(bad, true); return; }
+  const bad = frameOk(); if (bad) { msg(bad, true); await zeroLog('실패: ' + bad); return; }
   if (!confirm('보관함에 폰이 하나도 없고, 카메라 앞을 가리는 사람이 없을 때 누르세요. 영점을 맞출까요?')) return;
   msg('번호표를 찾는 중이에요…'); await new Promise(r => setTimeout(r, 50));
   Hn = null; aligned = null; off = {x: 0, y: 0};
   const res = findLabels(frameAt(DET_W));
-  if (!res.ok) { msg(res.msg + ' (안 되면 설정 ▾ → [칸 직접 맞추기])', true); return; }
+  if (!res.ok) { msg(res.msg + ' (안 되면 설정 ▾ → [칸 직접 맞추기])', true); await zeroLog('실패: ' + res.msg + ' / 찾은 줄 ' + JSON.stringify(window.__rows || [])); return; }
   calib = res.calib; computeRegions(); slotState = {}; prevFeat = {}; lastScores = {};
   saveRef(); baseFromRef(); saveAnchor();
   regions.forEach(r => slotState[r.slot] = {s: 0, p: 0, pt: 0});
   await saveSettings();
+  await zeroLog(`성공: ${res.found}칸, 짐작 ${res.guessed}칸, 노란112 ${res.yellow ? '찾음' : '못 찾음'}, 서버 저장 ${serverOk ? '됨' : '안 됨'}`);
   msg(`영점 완료 — ${res.found}칸${res.guessed ? `(그중 ${res.guessed}칸은 가려져 위치를 짐작)` : ''}${res.yellow ? '' : ' · 노란 112번을 못 찾아 방향은 추측'}. 네모 위 숫자가 실제 칸 번호와 맞는지 한 번 봐 주세요`);
   render();
 };
