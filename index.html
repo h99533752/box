@@ -411,6 +411,7 @@ function camFlag(bad) { // 3번 연속(약 1분 반) 못 맞추면 경고·기�
 /* ===== 검사 ===== */
 async function check() {
   lastCheck = Date.now();
+  if (camDead()) { msg('카메라가 끊겨서 다시 켜는 중이에요', true); await reviveCam('검사 때 카메라 끊김'); render(); return; }
   if (!regions.length) { msg('먼저 [칸 맞추기]를 해 주세요'); return; }
   if (!Object.keys(base).length) { msg('보관함이 비었을 때 [빈 보관함 기준 저장]을 눌러 주세요'); return; }
   let cam, useA = false;
@@ -673,7 +674,23 @@ async function startCam(deviceId) {
 async function keepAwake() {
   try { if ('wakeLock' in navigator) wakeLock = await navigator.wakeLock.request('screen'); } catch (e) {}
 }
-document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') keepAwake(); });
+// 폰이 잠겼다 풀리면 카메라 연결이 끊겨 화면이 검게 멈춤 → 저절로 다시 켬
+function camDead() {
+  const t = stream && stream.getVideoTracks()[0];
+  return !t || t.readyState === 'ended' || t.muted || !v.videoWidth || v.paused;
+}
+let lastRestart = 0;
+async function reviveCam(why) {
+  if (Date.now() - lastRestart < 20000) return; // 너무 자주 다시 켜지 않게
+  lastRestart = Date.now();
+  queue.push({t: Date.now(), slot: '카메라', state: '다시 켬 — ' + why, score: 0}); saveLocal('nxq', queue);
+  await startCam($('cam').value || null);
+}
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState !== 'visible') return;
+  keepAwake();
+  setTimeout(() => { if (camDead()) reviveCam('화면 켜진 뒤 카메라 끊김'); }, 1500);
+});
 
 /* ===== 시작 ===== */
 (async () => {
