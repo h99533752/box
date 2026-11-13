@@ -488,15 +488,17 @@ function findLabelsAt(id, lum, br, T) {
     // 기울기: 덩어리 중심으로 직선
     let sx = 0, sy = 0, sxx = 0, sxy = 0; g.forEach(s => { sx += s.cx; sy += s.cy; sxx += s.cx * s.cx; sxy += s.cx * s.cy; });
     const n = g.length, den = n * sxx - sx * sx, k = n > 1 && Math.abs(den) > 1e-6 ? (n * sxy - sx * sy) / den : 0, b0 = (sy - k * sx) / n;
-    // 장수 추정(간격을 알면), 모르면 12장
-    let cntL = 12, pitch = ext / 12;
-    const ws = g.filter(s => s.kind === 1 && s.w / s.h <= 2.3).map(s => s.w).sort((a, b) => a - b);
-    const lw = ws.length ? ws[ws.length >> 1] : sw;
-    if (lw) { const gap = Math.max(0, (ext - 12 * lw) / 11); const p = lw + gap; cntL = Math.round((ext + gap) / p); if (cntL >= 12) cntL = 12; pitch = cntL >= 12 ? ext / 12 : p; }
-    if (cntL < 9) return;
+    // 일단 12장으로 고르게 나눠 둠(보관함 단위로 다시 맞춤)
+    const sing = g.filter(s => s.w / s.h >= 0.8 && s.w / s.h <= 2.3).sort((a, b) => a.cx - b.cx);
+    const lws = sing.map(s => s.w).sort((a, b) => a - b), lw = lws.length ? lws[lws.length >> 1] : (sw || ext / 14);
     const pts = [];
-    for (let i = 0; i < cntL; i++) { const x = xL + pitch * (i + 0.5); pts.push({cx: x, cy: k * x + b0, kind: 1}); }
-    g.filter(s => s.kind === 2).forEach(s => { let bi = 0, bd = 1e9; pts.forEach((p, i) => { const dd = Math.abs(p.cx - s.cx); if (dd < bd) { bd = dd; bi = i; } }); pts[bi].kind = 2; });
+    for (let i = 0; i < 12; i++) { const x = xL + lw / 2 + (ext - lw) / 11 * i; pts.push({cx: x, cy: k * x + b0, kind: 1}); }
+    const ds = []; for (let i = 1; i < sing.length; i++) { const dd = sing[i].cx - sing[i - 1].cx; if (dd > lw * 0.9 && dd < lw * 1.9) ds.push(dd); }
+    ds.sort((a, b) => a - b);
+    // 줄 끝 번호표가 틀에 반쯤 가려져 좁게 보이면, 원래 크기로 쳐서 끝 위치를 바로잡음
+    const sL = g.reduce((a, q) => q.x0 < a.x0 ? q : a), sR = g.reduce((a, q) => q.x1 > a.x1 ? q : a);
+    const xLc = sL.w < lw * 0.75 && sL.w / sL.h < 1.2 ? sL.x1 - lw : xL, xRc = sR.w < lw * 0.75 && sR.w / sR.h < 1.2 ? sR.x0 + lw : xR;
+    Object.assign(pts, {xLc, xRc, sing, lw, k, b0, pitch: ds.length >= 3 ? ds[ds.length >> 1] : 0, yel: g.filter(s => s.kind === 2).map(s => s.cx)});
     pts.ext = ext; pts.y = k * (xL + xR) / 2 + b0; pts.xL = xL; pts.xR = xR; pts.h = h;
     pts.fill = g.reduce((s, q) => s + q.fill * q.w, 0) / g.reduce((s, q) => s + q.w, 0);
     rows.push(pts);
@@ -506,6 +508,7 @@ function findLabelsAt(id, lum, br, T) {
   const need = side === 'ALL' ? 6 : 3;
   if (rows.length < need) return {ok: false, rowsFound, msg: `번호표 줄을 ${rows.length}줄만 찾았어요(필요 ${need}줄). 보관함이 화면에 크게, 다 보이게 놓고 다시 해 주세요`};
   // 보관함 하나 = 왼쪽·오른쪽 끝이 거의 같은 번호표 줄 4개가 고르게 쌓인 묶음. 창문 블라인드 같은 가짜 줄을 거름
+  const cpRow = r => Object.assign(r.slice(), {xLc: r.xLc, xRc: r.xRc, sing: r.sing, lw: r.lw, k: r.k, b0: r.b0, pitch: r.pitch, yel: r.yel, y: r.y, xL: r.xL, xR: r.xR, ext: r.ext, h: r.h, fill: r.fill, fake: r.fake});
   const groups4 = [];
   // 같은 보관함의 줄: 많이 겹치고, 왼쪽 끝이나 오른쪽 끝 중 하나는 거의 같음(한쪽이 흐리게 덜 잡혀도 인정)
   const sameCab = (r, r0, tol) => { const ov = Math.min(r.xR, r0.xR) - Math.max(r.xL, r0.xL); return ov > 0.6 * Math.min(r.ext, r0.ext) && (Math.abs(r.xL - r0.xL) < tol || Math.abs(r.xR - r0.xR) < tol); };
@@ -558,25 +561,73 @@ function findLabelsAt(id, lum, br, T) {
       if (!best || sc < best.sc) best = {sc, A, B};
     }
     if (!best) return {ok: false, rowsFound, msg: '나란히 붙은 보관함 두 개를 찾지 못했어요. 보관함 두 개가 화면에 다 들어오게 해 주세요'};
-    cols = [best.A.q.map(r => r.slice()), best.B.q.map(r => r.slice())];
+    cols = [best.A.q.map(cpRow), best.B.q.map(cpRow)];
   } else {
     groups4.sort((a, b) => a.score - b.score);
-    cols = [groups4[0].q.map(r => r.slice())];
+    cols = [groups4[0].q.map(cpRow)];
   }
-  // 12장보다 적게 보이는 줄(비스듬히 찍혀 가려짐): 같은 보관함 다른 줄을 보고 모자란 끝을 이어 붙임
+  // 보관함마다 '가장 긴 줄'의 양 끝을 기준으로, 짧은 줄은 가려진 쪽 번호표를 짐작해 12장을 다시 배치
   let guessed = 0;
-  cols.forEach((cl, ci) => {
-    const full = cl.filter(c => c.length >= 12);
-    const fx0 = full.length ? full.reduce((s, c) => s + c[0].cx, 0) / full.length : null, fx1 = full.length ? full.reduce((s, c) => s + c[c.length - 1].cx, 0) / full.length : null;
-    cl.forEach(c => {
-      if (c.length >= 12) return;
-      const sp = (c[c.length - 1].cx - c[0].cx) / Math.max(1, c.length - 1), dy = (c[c.length - 1].cy - c[0].cy) / Math.max(1, c.length - 1);
-      while (c.length < 12) {
-        guessed++;
-        const missStart = fx0 !== null ? Math.abs(c[0].cx - fx0) > Math.abs(c[c.length - 1].cx - fx1) : (cols.length === 2 && ci === 1);
-        if (missStart) c.unshift({cx: c[0].cx - sp, cy: c[0].cy - dy, kind: 0});
-        else c.push({cx: c[c.length - 1].cx + sp, cy: c[c.length - 1].cy + dy, kind: 0});
+  cols = cols.map((cl, ci) => {
+    const real = cl.filter(r => !r.fake && r.sing);
+    if (!real.length) return cl;
+    real.forEach(r => { if (r.xLc === undefined) { r.xLc = r.xL; r.xRc = r.xR; } r.extc = r.xRc - r.xLc; });
+    const maxExt = Math.max(...real.map(r => r.extc)), ref = real.filter(r => r.extc >= maxExt * 0.95);
+    const lin = key => { // 높이(y)에 따라 끝 위치가 조금씩 달라지는 것(원근)을 직선으로
+      if (ref.length < 2) { const v = ref[0][key]; return () => v; }
+      let sx = 0, sy = 0, sxx = 0, sxy = 0; ref.forEach(r => { sx += r.y; sy += r[key]; sxx += r.y * r.y; sxy += r.y * r[key]; });
+      const n = ref.length, den = n * sxx - sx * sx; if (Math.abs(den) < 1e-6) return () => sy / n;
+      const kk = (n * sxy - sx * sy) / den, bb = (sy - kk * sx) / n; return y => kk * y + bb;
+    };
+    const fL = lin('xLc'), fR = lin('xRc');
+    // 가장 긴 줄도 틀에 가려 12장이 다 안 보일 수 있음 → 노란 112번(맨 아래 줄 8번째)을 기준으로 가려진 장수를 셈
+    let cL = 0, cR = 0;
+    const yr = cl[3];
+    if (yr && !yr.fake && yr.yel && yr.yel.length && yr.sing) {
+      const ps = real.map(r => r.pitch).filter(v => v).sort((a, b) => a - b);
+      const yx = yr.yel[0], p = yr.pitch || (ps.length ? ps[ps.length >> 1] : (yr.ext - yr.lw) / 11);
+      const first = Math.min((yr.xLc ?? yr.xL) + yr.lw / 2, yx), last = Math.max((yr.xRc ?? yr.xR) - yr.lw / 2, yx);
+      const jL = Math.round((yx - first) / p), jR = Math.round((last - yx) / p);
+      const un = [7 - jL, 4 - jR], mi = [4 - jL, 7 - jR];
+      const okv = v => v[0] >= 0 && v[1] >= 0 && v[0] + v[1] <= 3;
+      const pick = okv(un) && (!okv(mi) || un[0] + un[1] <= mi[0] + mi[1]) ? un : (okv(mi) ? mi : [0, 0]);
+      [cL, cR] = pick;
+    }
+    // 노란 112번이 보이면: 그 칸(왼쪽부터 8번째, 뒤집혔으면 5번째)을 기준으로 같은 간격의 칸 12개를 줄마다 깔아 둠
+    // (가장자리 번호표가 틀에 가려 몇 장 보이는지 세지 않아도 됨)
+    if (yr && !yr.fake && yr.yel && yr.yel.length && yr.sing) {
+      const ps = real.map(r => r.pitch).filter(v => v).sort((a, b) => a - b);
+      const yx = yr.yel[0], yb = yr.y, pB = yr.pitch || (ps.length ? ps[ps.length >> 1] : (yr.ext - yr.lw) / 11);
+      const yIdx = (yx - (yr.xLc ?? yr.xL)) >= ((yr.xRc ?? yr.xR) - yx) ? 7 : 4;
+      const wB = fR(yb) - fL(yb);
+      return cl.map(r => {
+        const sc = wB > 0 ? (fR(r.y) - fL(r.y)) / wB : 1, x7 = fL(r.y) + (yx - fL(yb)) * sc, p = pB * sc, pts = [];
+        const k = r.k ?? 0, b0 = r.b0 ?? r.y;
+        for (let i = 0; i < 12; i++) {
+          let x = x7 + (i - yIdx) * p, y = k * x + b0, kind = 0;
+          let best = null, bd = p * 0.4; (r.sing || []).forEach(q => { const dd = Math.abs(q.cx - x); if (dd < bd) { bd = dd; best = q; } });
+          if (best) { x = best.cx; y = best.cy; kind = 1; } else guessed++;
+          if (r === yr && i === yIdx) kind = 2;
+          pts.push({cx: x, cy: y, kind});
+        }
+        return Object.assign(pts, {y: r.y, xL: r.xL, xR: r.xR, ext: r.ext, h: r.h});
+      });
+    }
+    return cl.map(r => {
+      if (r.fake || !r.sing) return r;
+      const RL = fL(r.y), RR = fR(r.y), lw = r.lw, pitch = (RR - RL - lw) / (11 - cL - cR);
+      if (!(pitch > 0)) return r;
+      const missL = Math.max(0, Math.round((r.xLc - RL) / pitch)) + cL, missR = Math.max(0, Math.round((RR - r.xRc) / pitch)) + cR;
+      guessed += missL + missR;
+      const start = r.xLc + lw / 2 - missL * pitch, pts = [];
+      for (let i = 0; i < 12; i++) {
+        let x = start + pitch * i, y = r.k * x + r.b0, kind = i < missL || i >= 12 - missR ? 0 : 1;
+        let best = null, bd = pitch * 0.4; r.sing.forEach(q => { const dd = Math.abs(q.cx - x); if (dd < bd) { bd = dd; best = q; } });
+        if (best && kind) { x = best.cx; y = best.cy; }
+        pts.push({cx: x, cy: y, kind});
       }
+      r.yel.forEach(yx => { let bi = 0, bd = 1e9; pts.forEach((p, i) => { const dd = Math.abs(p.cx - yx); if (dd < bd) { bd = dd; bi = i; } }); pts[bi].kind = 2; });
+      return Object.assign(pts, {y: r.y, xL: r.xL, xR: r.xR, ext: r.ext, h: r.h});
     });
   });
   // 노란 112번(오른쪽 보관함 맨 아래 줄 왼쪽에서 8번째)으로 좌우 뒤집힘·오른쪽 보관함 찾기
