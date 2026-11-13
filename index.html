@@ -709,10 +709,12 @@ async function check() {
     // 두 방법(무늬 대조·번호표 따라가기)을 다 해 보고, 기준 사진과 더 잘 맞는 쪽을 씀
     const cands = [];
     try { if (align()) cands.push({how: '무늬', Hn, aligned, e: alignErr(aligned)}); } catch (e) { alInfo.err = String(e.message || e).slice(0, 40); }
-    try { if (trackLabels()) cands.push({how: '번호표', Hn, aligned, e: alignErr(aligned)}); } catch (e) { alInfo.err = 'L:' + String(e.message || e).slice(0, 30); }
+    try { if (trackLabels()) { const e = alignErr(aligned); cands.push({how: '번호표', Hn, aligned, e, strong: alInfo.labInl >= 70}); } } catch (e) { alInfo.err = 'L:' + String(e.message || e).slice(0, 30); }
     cands.sort((a, b) => a.e - b.e);
     alInfo.errs = cands.map(c => c.how + Math.round(c.e)).join('/');
-    if (cands.length && cands[0].e < 30) { ({Hn, aligned} = cands[0]); alInfo.how = cands[0].how; ok = true; }
+    // 번호표가 70칸 넘게 정확히 짝지어지면 밝기 차이가 커도 믿음(사람·폰·조명 때문에 차이 점수가 오를 수 있음)
+    const pick = cands.find(c => c.e < 30) || cands.find(c => c.strong && c.e < 70);
+    if (pick) { ({Hn, aligned} = pick); alInfo.how = pick.how; ok = true; }
     if (ok) { cam = camFlag(false); useA = true; alInfo.fail = 0; } else { Hn = null; aligned = null; alInfo.fail = (alInfo.fail || 0) + 1; cam = await camCheck(); } }
   else cam = await camCheck();
   if (cam !== 'ok') {
