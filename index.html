@@ -43,7 +43,7 @@
     <div class="grp">맡을 보관함 <select id="side"><option value="ALL">둘 다</option><option value="L">왼쪽만(25~111)</option><option value="R">오른쪽만(61~112)</option></select></div>
     <div class="grp">네모 조정 <button id="gUp">위로</button><button id="gDn">아래로</button><button id="gTall">길게</button><button id="gShort">짧게</button><button id="gWide">넓게</button><button id="gNarrow">좁게</button></div>
     <div class="grp">직접 하기 <button id="bCal">칸 직접 맞추기</button><button id="bBase">빈 보관함 기준만 저장</button></div>
-    <div class="grp"><button id="bOne">이 칸만 빈칸으로</button><button id="bNow">지금 검사</button><button id="bHide">네모 숨기기</button><label>민감도 <input id="thr" type="range" min="5" max="60" value="20"><span id="thrv">20</span>%</label></div>
+    <div class="grp"><button id="bOne">이 칸만 빈칸으로</button><button id="bNow">지금 검사</button><button id="bHide">네모 숨기기</button><button id="bRef">기준 사진 보기</button><label>민감도 <input id="thr" type="range" min="5" max="60" value="20"><span id="thrv">20</span>%</label></div>
   </div>
 </div>
 <div id="msg">보관함이 비었을 때 [영점 맞추기]를 한 번 눌러 주세요. 번호표를 찾아 칸을 맞추고 빈 보관함 사진까지 저장해요</div>
@@ -57,7 +57,7 @@
 const WEBAPP_URL = '';            // 페이지를 앱스 스크립트 밖에 올릴 때만 웹 앱 주소를 넣음
 const KEY = 'nx-box-0911';
 const INTERVAL = 30000;           // 30초마다 검사(2번 연속 같아야 기록 → 약 1분 안쪽)
-const BEAT = 300000;              // 5분마다 살아 있다는 신호
+const BEAT = 120000;              // 5분마다 살아 있다는 신호
 const GRID_W = 8, GRID_H = 16, DIFF = 30;
 const range = (a, b) => Array.from({length: b - a + 1}, (_, i) => a + i);
 // 보관함 줄 구성(사진 11/8 기준). 칸 번호가 바뀌면 여기만 고친다.
@@ -159,11 +159,12 @@ function adjGeom(k, d) {
   else msg('네모를 조정했어요. 다 맞추면 보관함이 비었을 때 ② 빈 보관함 기준 저장을 눌러 주세요');
   render();
 }
-function computeRegions() {
-  regions = [];
+function computeRegions() { regions = buildRegions(calib); }
+function buildRegions(cal) {
+  const out = [];
   const AR = activeRows();
-  if (!calib || calib.length !== AR.length) return;
-  const info = AR.map((r, i) => ({box: r.box, slots: r.slots, c: calib[i], y: (calib[i].y1 + calib[i].y2) / 2}));
+  if (!cal || cal.length !== AR.length) return out;
+  const info = AR.map((r, i) => ({box: r.box, slots: r.slots, c: cal[i], y: (cal[i].y1 + cal[i].y2) / 2, row: i}));
   info.forEach(ri => {
     const same = info.filter(o => o.box === ri.box);
     const idx = same.indexOf(ri);
@@ -176,9 +177,10 @@ function computeRegions() {
       let x = ri.c.x1 + (ri.c.x2 - ri.c.x1) * t;
       let y = ri.c.y1 + (ri.c.y2 - ri.c.y1) * t;
       if (P) { x = P[k][0]; y = P[k][1]; }
-      regions.push({slot: s, x0: x - sp * geom.w, x1: x + sp * geom.w, y0: y - gap * (geom.top - geom.dy), y1: y - gap * (geom.bot - geom.dy)});
+      out.push({slot: s, box: ri.box, row: ri.row, k, x0: x - sp * geom.w, x1: x + sp * geom.w, y0: y - gap * (geom.top - geom.dy), y1: y - gap * (geom.bot - geom.dy)});
     });
   });
+  return out;
 }
 
 /* ===== 화면 잡기·특징 뽑기 ===== */
@@ -319,7 +321,7 @@ function frameAt(w) {
 function saveRef() {
   refImg = frameAt(REF_W);
   try { localStorage.setItem('nxref_' + side, refCan.toDataURL('image/jpeg', 0.92)); } catch (e) {}
-  Hn = null; aligned = null; prepRef();
+  Hn = null; aligned = null; refMaskCache = null; prepRef();
 }
 function loadRef() {
   refImg = null; Hn = null; aligned = null; prepRef();
@@ -698,9 +700,108 @@ function frameOk() {
 }
 
 /* ===== 검사 ===== */
+/* ===== 새 판정 방식(11/13): 기준 사진 없이 '같은 순간, 같은 줄 이웃 칸'과 비교 =====
+ 1) 매번 번호표를 새로 찾아 칸 위치를 잡음(못 찾으면 직전 위치 사용)
+ 2) 칸마다 밝기를 뺀 무늬(평균 0·크기 1로 맞춤)를 뽑음 → 조명·노출 변화에 영향 없음
+ 3) 같은 보관함·같은 줄의 가까운 칸 6개 무늬의 '가운데값'과 비교 → 혼자 튀는 칸 = 폰
+ 4) 비어 있다고 확실할 때 그 칸 모습을 조금씩 익혀(own) 같은 줄에 폰이 많을 때 보완 */
+let lastCal = null, labFail = 0, ownT = {}, lastRaw = {};
+function nfeat(img, r) {
+  const f = feat(img, img.width, img.height, r), n = f.length;
+  let m = 0; for (let i = 0; i < n; i++) m += f[i]; m /= n;
+  let v = 0; for (let i = 0; i < n; i++) v += (f[i] - m) * (f[i] - m); const sd = Math.max(6, Math.sqrt(v / n));
+  const z = new Float32Array(n); for (let i = 0; i < n; i++) z[i] = (f[i] - m) / sd;
+  z.mean = m; return z;
+}
+const zdiff = (a, b) => { let e = 0; for (let i = 0; i < a.length; i++) e += Math.abs(a[i] - b[i]); return e / a.length; };
+function medianFeat(list) {
+  const n = list[0].length, out = new Float32Array(n), tmp = new Array(list.length);
+  for (let i = 0; i < n; i++) { for (let j = 0; j < list.length; j++) tmp[j] = list[j][i]; tmp.sort((a, b) => a - b); out[i] = tmp[tmp.length >> 1]; }
+  return out;
+}
+// 빈 칸이면 칸 가운데에 '좁고 어두운 틈'이 위아래로 보임. 폰이 꽂히면 틈이 가려지거나(밝은 폰) 넓게 어두워짐(검은 폰)
+function slitScore(img, r, edge) {
+  const W = img.width, H = img.height, d = img.data;
+  const cx = (r.x0 + r.x1) / 2 * W, hw = (r.x1 - r.x0) * W * 0.8;
+  const X0 = Math.max(0, Math.round(cx - hw)), X1 = Math.min(W - 1, Math.round(cx + hw));
+  const Y0 = Math.max(0, Math.round(r.y0 * H)), Y1 = Math.min(H - 1, Math.round(r.y1 * H));
+  if (X1 - X0 < 4 || Y1 - Y0 < 4) return 0;
+  const line = new Float32Array(X1 - X0 + 1); let ok = 0, rows = 0;
+  for (let k = 0; k < 24; k++) {
+    const y = Math.round(Y0 + (Y1 - Y0) * k / 23); rows++;
+    for (let x = X0; x <= X1; x++) { const p = (y * W + x) * 4; line[x - X0] = (d[p] + d[p + 1] + d[p + 2]) / 3; }
+    const srt = Float32Array.from(line).sort(), m = srt[srt.length >> 1], mn = srt[0];
+    if (m - mn < 0.15 * m) continue;
+    const t = m - 0.5 * (m - mn); let dk = 0; for (let i = 0; i < line.length; i++) if (line[i] < t) dk++;
+    if (dk / line.length < 0.4) ok++;
+  }
+  return Math.round((1 - ok / rows) * 100);
+}
+function relScores(img, regs) {
+  const F = {}; regs.forEach(r => F[r.slot] = nfeat(img, r));
+  const sc = {}, raw = {};
+  regs.forEach(r => {
+    let nb = regs.filter(q => q !== r && q.box === r.box && q.row === r.row).sort((a, b) => Math.abs(a.k - r.k) - Math.abs(b.k - r.k)).slice(0, 6);
+    if (nb.length < 4) nb = nb.concat(regs.filter(q => q.box === r.box && q.row === r.row - 1).sort((a, b) => Math.abs((a.x0 + a.x1) - (r.x0 + r.x1)) - Math.abs((b.x0 + b.x1) - (r.x0 + r.x1))).slice(0, 6 - nb.length));
+    const rowS = nb.length ? zdiff(F[r.slot], medianFeat(nb.map(q => F[q.slot]))) : 0;
+    const own = ownT[r.slot];
+    const ownS = own && own.n >= 5 ? zdiff(F[r.slot], own.f) : null;
+    // 줄 비교와 자기 빈 모습 비교 중 '더 낮은 쪽'을 씀(둘 다 다르다고 해야 폰으로 봄)
+    const z = ownS === null ? rowS : Math.min(rowS, ownS * 1.1);
+    const rowN = regs.filter(q => q.box === r.box && q.row === r.row).length;
+    const rel = Math.min(100, Math.round(z * 60)), sl = slitScore(img, r, r.k === 0 || r.k === rowN - 1);
+    raw[r.slot] = [sl, rel];
+    // 두 기준이 모두 '다르다'고 할 때만 꽂힘 쪽 점수가 올라감(틈 점수 50↑ 그리고 이웃 비교 점수 민감도↑)
+    sc[r.slot] = sl >= 50 ? rel : Math.min(rel, Math.round(sl * 0.3));
+  });
+  return {F, sc, raw};
+}
+async function checkRel() {
+  const img = frameAt(DET_W);
+  let res = null; try { res = findLabels(img); } catch (e) { res = {ok: false}; }
+  if (res.ok) { lastCal = res.calib; labFail = 0; } else labFail++;
+  const cal = res.ok ? res.calib : (lastCal || calib);
+  alInfo.how = res.ok ? '번호표' : '직전 위치'; alInfo.lab = res.ok ? res.found : 0; alInfo.fail = labFail;
+  const st0 = camFlag(!res.ok && labFail >= 3 ? true : false);
+  if (labFail >= 6 && st0 === 'alarm') { msg('⚠ 번호표가 3분 넘게 안 보여요. 보관함 앞을 비우거나 카메라 위치를 확인해 주세요', true); }
+  const regs = buildRegions(cal); if (!regs.length) { msg('먼저 [영점 맞추기]를 해 주세요'); return; }
+  regions = regs; Hn = null; aligned = null; off = {x: 0, y: 0};
+  const {F, sc, raw} = relScores(img, regs); lastRaw = raw;
+  // 사람이 앞을 가리면 한 번에 많은 칸이 바뀜 → 이번 검사는 건너뜀
+  let moved = 0, tot = 0;
+  regs.forEach(r => { const p = prevFeat[r.slot]; if (p && p.length === F[r.slot].length) { tot++; if (zdiff(F[r.slot], p) > 0.9) moved++; } });
+  prevFeat = F;
+  if (tot && moved / tot > 0.3) { msg('앞이 가려져서 이번 검사는 건너뛰었어요'); render(); return 'skip'; }
+  const now = Date.now(), evs = [];
+  regs.forEach(r => {
+    const s = sc[r.slot]; lastScores[r.slot] = s;
+    const nw = s >= thr ? 1 : 0;
+    const st = slotState[r.slot] || (slotState[r.slot] = {s: null, p: 0, pt: 0});
+    if (st.s === null) { st.s = nw; if (nw === 1) evs.push({t: now, slot: r.slot, state: 2, score: s}); }
+    else if (nw !== st.s) { if (st.p === 0) st.pt = now; st.p++; if (st.p >= 2) { st.s = nw; st.p = 0; evs.push({t: st.pt, slot: r.slot, state: nw, score: s}); } }
+    else st.p = 0;
+    // 확실히 빈 칸이면 그 모습을 조금씩 익힘
+    if (st.s === 0 && s < thr * 0.6) { const o = ownT[r.slot]; if (!o) ownT[r.slot] = {f: Float32Array.from(F[r.slot]), n: 1}; else { const a = o.n < 10 ? 1 / (o.n + 1) : 0.1; for (let i = 0; i < o.f.length; i++) o.f[i] += (F[r.slot][i] - o.f[i]) * a; o.n++; } }
+  });
+  if (evs.length) { queue.push(...evs); saveLocal('nxq', queue); }
+  await flush();
+  const occ = Object.values(slotState).filter(s => s.s === 1).length;
+  if (now - lastBeat > BEAT) {
+    lastBeat = now;
+    // 칸별 점수(틈/이웃)를 남겨, 실제 꽂힌 칸과 맞춰 보며 기준을 다듬는 데 씀
+    const det = Object.entries(lastRaw).map(([k, v]) => `${k}:${v[0]}/${v[1]}`).join(' ');
+    const note = `새 방식 · 위치 ${alInfo.how} · 번호표 ${alInfo.lab}칸 · 연속실패 ${labFail} · 익힌 칸 ${Object.values(ownT).filter(o => o.n >= 5).length} · 꽂힘 ${Object.entries(slotState).filter(([k, v]) => v.s === 1).map(([k]) => k).join(',')} || ${det}`;
+    try { await call({type: 'beat', occupied: occ, side, note}); serverOk = true; } catch (e) { serverOk = false; }
+  }
+  msg(evs.length ? `바뀐 칸 ${evs.length}개 기록` : '감시 중');
+  render();
+  return 'ok';
+}
+
 async function check() {
   lastCheck = Date.now();
   if (camDead()) { msg('카메라가 끊겨서 다시 켜는 중이에요', true); await reviveCam('검사 때 카메라 끊김'); render(); return; }
+  if (calib && calib[0] && calib[0].pts) { await checkRel(); return; } // 영점(번호표 자동 찾기)을 한 번이라도 했으면 새 방식
   if (!regions.length) { msg('먼저 [칸 맞추기]를 해 주세요'); return; }
   if (!Object.keys(base).length) { msg('보관함이 비었을 때 [빈 보관함 기준 저장]을 눌러 주세요'); return; }
   let cam, useA = false;
@@ -785,7 +886,8 @@ function render() {
     const [W, H] = frameSize();
     const s = Math.min(1, 1280 / Math.max(W, H));
     view.width = Math.round(W * s); view.height = Math.round(H * s);
-    if (vz === 1) drawFrame(vctx, view.width, view.height);
+    if (showRef && refImg) { const c = document.createElement('canvas'); c.width = refImg.width; c.height = refImg.height; c.getContext('2d').putImageData(refImg, 0, 0); vctx.drawImage(c, 0, 0, view.width, view.height); }
+    else if (vz === 1) drawFrame(vctx, view.width, view.height);
     else {
       const fs = Math.min(1, 1800 / Math.max(W, H));
       full.width = Math.round(W * fs); full.height = Math.round(H * fs);
@@ -801,7 +903,7 @@ function render() {
     const st = slotState[r.slot];
     const col = !st || st.s === null ? '#999' : st.p ? '#facc15' : st.s ? '#22c55e' : '#64748b';
     vctx.strokeStyle = col;
-    const P = [[r.x0, r.y0], [r.x1, r.y0], [r.x1, r.y1], [r.x0, r.y1]].map(([x, y]) => toCur(x, y));
+    const P = [[r.x0, r.y0], [r.x1, r.y0], [r.x1, r.y1], [r.x0, r.y1]].map(([x, y]) => showRef ? [x, y] : toCur(x, y));
     vctx.beginPath(); P.forEach(([x, y], i) => i ? vctx.lineTo(SX(x), SY(y)) : vctx.moveTo(SX(x), SY(y))); vctx.closePath(); vctx.stroke();
     vctx.fillStyle = col;
     const sc = lastScores[r.slot];
@@ -900,7 +1002,9 @@ $('bZero').onclick = async () => {
 $('bOne').onclick = () => { mode = mode === 'one' ? '' : 'one'; $('bOne').classList.toggle('on', mode === 'one'); msg(mode ? '지금 확실히 빈 칸의 네모를 누르세요' : '취소했어요'); };
 $('bNow').onclick = () => check();
 // 화면 캡처를 Claude에게 보낼 때 네모 없이 깨끗한 화면을 보여 주는 버튼
-let hideBoxes = false;
+let hideBoxes = false, showRef = false;
+// 영점 때 찍어 둔 기준 사진을 화면에 띄워 지금 화면과 비교(문제 찾기용). 네모는 기준 사진 자리 그대로 그림
+$('bRef').onclick = () => { showRef = !showRef; $('bRef').textContent = showRef ? '지금 화면 보기' : '기준 사진 보기'; msg(showRef ? '지금 보이는 건 영점 때 찍은 기준 사진이에요' : '지금 카메라 화면이에요'); render(); };
 $('bHide').onclick = () => { hideBoxes = !hideBoxes; $('bHide').textContent = hideBoxes ? '네모 보이기' : '네모 숨기기'; render(); };
 $('bMore').onclick = () => { const h = $('more').classList.toggle('hide'); $('bMore').textContent = h ? '설정 ▾' : '설정 ▴'; };
 // 가로 화면에서 버튼 줄이 카메라를 가리지 않게 접고 펴기(상태 기억)
