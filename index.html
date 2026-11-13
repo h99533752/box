@@ -295,6 +295,7 @@ const sh = r => ({slot: r.slot, x0: r.x0 + off.x, x1: r.x1 + off.x, y0: r.y0 + o
  그림 처리 도구(OpenCV)를 못 불러오면 위의 '작은 흔들림 보정'만 쓴다. */
 const CV_URL = 'https://cdn.jsdelivr.net/npm/@techstark/opencv-js@4.10.0-release.1/dist/opencv.js';
 const REF_W = 1024;
+let alInfo = {}; // 맞춤 진단(시트 '보관함설정' F칸에 5분마다 남김)
 let CV = null, refImg = null, refPrep = null, Hn = null, aligned = null, lastInl = 0;
 const refCan = document.createElement('canvas'), rctx = refCan.getContext('2d', {willReadFrequently: true});
 function loadCv() {
@@ -371,7 +372,7 @@ function align() { // 성공하면 true (Hn·aligned 갱신)
   const src = cv.matFromImageData(cur), gray = new cv.Mat(); cv.cvtColor(src, gray, cv.COLOR_RGBA2GRAY);
   const orb = new cv.ORB(4000), kp = new cv.KeyPointVector(), des = new cv.Mat(), none = new cv.Mat();
   orb.detectAndCompute(gray, none, kp, des);
-  let ok = false;
+  let ok = false; alInfo = {fail: alInfo.fail, ref: refPrep.des.rows, cur: des.rows, good: 0, inl: 0};
   if (des.rows >= 10 && refPrep.des.rows >= 10) {
     const bf = new cv.BFMatcher(cv.NORM_HAMMING, false), mm = new cv.DMatchVectorVector();
     bf.knnMatch(refPrep.des, des, mm, 2);
@@ -381,10 +382,12 @@ function align() { // 성공하면 true (Hn·aligned 갱신)
       const m0 = pr.get(0), m1 = pr.get(1);
       if (m0.distance < 0.8 * m1.distance) { const p = refPrep.kp.get(m0.queryIdx).pt, q = kp.get(m0.trainIdx).pt; a.push(p.x, p.y); b.push(q.x, q.y); }
     }
+    alInfo.good = a.length / 2;
     if (a.length / 2 >= 12) {
       const A = cv.matFromArray(a.length / 2, 1, cv.CV_32FC2, a), B = cv.matFromArray(b.length / 2, 1, cv.CV_32FC2, b), inl = new cv.Mat();
       const H = cv.findHomography(A, B, cv.RANSAC, 4, inl);
       let n = 0; for (let i = 0; i < inl.rows; i++) if (inl.data[i]) n++;
+      alInfo.inl = n; alInfo.sane = !H.empty() && sane(H.data64F, refPrep.w, refPrep.h);
       if (!H.empty() && n >= 20 && sane(H.data64F, refPrep.w, refPrep.h)) {
         const out = new cv.Mat();
         cv.warpPerspective(src, out, H, new cv.Size(refPrep.w, refPrep.h), cv.INTER_LINEAR | cv.WARP_INVERSE_MAP);
@@ -662,10 +665,13 @@ async function check() {
   if (!regions.length) { msg('먼저 [칸 맞추기]를 해 주세요'); return; }
   if (!Object.keys(base).length) { msg('보관함이 비었을 때 [빈 보관함 기준 저장]을 눌러 주세요'); return; }
   let cam, useA = false;
-  if (CV && refPrep) { let ok = false; try { ok = align(); } catch (e) { ok = false; } cam = camFlag(!ok); useA = ok; }
+  // 1순위: 번호표 무늬 대조(자동 다시 맞추기). 안 되면 2순위: 작은 흔들림 보정(카메라가 거의 그대로면 그대로 검사)
+  if (CV && refPrep) { let ok = false; try { ok = align(); } catch (e) { ok = false; alInfo.err = String(e.message || e).slice(0, 40); }
+    if (ok) { cam = camFlag(false); useA = true; alInfo.fail = 0; } else { Hn = null; aligned = null; alInfo.fail = (alInfo.fail || 0) + 1; cam = await camCheck(); } }
   else cam = await camCheck();
   if (cam !== 'ok') {
     await flush();
+    if (Date.now() - lastBeat > BEAT) { lastBeat = Date.now(); try { await call({type: 'beat', occupied: -1, side, note: `검사 건너뜀(${cam}) · 점 ${alInfo.ref || 0}/${alInfo.cur || 0} · 짝 ${alInfo.good || 0} · 일치 ${alInfo.inl || 0}${alInfo.sane === false ? ' · 모양이상' : ''} · 연속실패 ${alInfo.fail || 0}`}); } catch (e) {} }
     msg(cam === 'alarm' ? '⚠ 보관함이 안 보여요. 보관함 두 개가 화면에 다 들어오게 놓으면 저절로 다시 맞춰요' : '화면이 기준과 달라 이번 검사는 건너뛰었어요(가림 또는 움직임)', cam === 'alarm');
     render(); return;
   }
@@ -702,7 +708,8 @@ async function check() {
   const occ = Object.values(slotState).filter(s => s.s === 1).length;
   if (now - lastBeat > BEAT) {
     lastBeat = now;
-    try { await call({type: 'beat', occupied: occ, side}); serverOk = true; } catch (e) { serverOk = false; }
+    const note = `맞춤 ${Hn ? '무늬대조' : (off.x || off.y) ? '흔들림보정' : '그대로'} · 점 ${alInfo.ref || 0}/${alInfo.cur || 0} · 짝 ${alInfo.good || 0} · 일치 ${alInfo.inl || 0}${alInfo.sane === false ? ' · 모양이상' : ''} · 연속실패 ${alInfo.fail || 0}${alInfo.err ? ' · ' + alInfo.err : ''}`;
+    try { await call({type: 'beat', occupied: occ, side, note}); serverOk = true; } catch (e) { serverOk = false; }
   }
   msg(evs.length ? `바뀐 칸 ${evs.length}개 기록` : '감시 중');
   render();
