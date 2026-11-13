@@ -26,7 +26,8 @@
   canvas{display:block;margin:0 auto;max-width:100%;max-height:86vh;width:auto;height:auto;touch-action:none}
   label{font-size:14px;display:flex;align-items:center;gap:4px}
   video{position:absolute;width:1px;height:1px;opacity:0}
-  #dim{display:none;position:fixed;inset:0;background:#000;z-index:9;color:#333;font-size:12px;align-items:flex-end;justify-content:center;padding-bottom:20px}
+  #dim{display:none;position:fixed;inset:0;background:#000;z-index:9}
+  #dimTxt{position:absolute;color:#6b7280;font-size:18px;line-height:1.5;text-align:center;white-space:nowrap}
 </style>
 </head>
 <body>
@@ -49,7 +50,7 @@
 <div id="stat"></div>
 <canvas id="view"></canvas>
 <video id="v" playsinline muted autoplay></video>
-<div id="dim">감시 중 · 화면을 누르면 다시 보여요</div>
+<div id="dim"><div id="dimTxt"></div></div>
 
 <script>
 /* ===== 설정 ===== */
@@ -421,29 +422,39 @@ function camFlag(bad) { // 3번 연속(약 1분 반) 못 맞추면 경고·기�
 /* ===== 영점 맞추기: 빈 보관함 사진에서 번호표(하늘색 네모 + 노란 112번)를 찾아 칸 번호를 매김 =====
  줄마다 번호표가 12장(왼쪽 맨 아래 줄은 110·111 + 빈 번호표) → 보관함 2개 × 4줄.
  노란 112번이 오른쪽 보관함 맨 아래 줄 8번째(왼쪽부터)인 것으로 좌우 뒤집힘·왼쪽/오른쪽 보관함을 가린다. */
-const DET_W = 1600;
+const DET_W = 2560; // 번호표가 작게 찍혀도 붙어 보이지 않게 카메라 원래 크기로
 function findLabels(id) {
   const W = id.width, H = id.height, d = id.data, N = W * H;
   const lum = new Uint8Array(N), br = new Int16Array(N);
   for (let i = 0, p = 0; i < N; i++, p += 4) { lum[i] = (d[p] + d[p + 1] + d[p + 2]) / 3; br[i] = d[p + 2] - d[p]; }
   const hist = new Int32Array(512); let cnt = 0;
-  for (let i = 0; i < N; i++) if (lum[i] > 110) { hist[br[i] + 256]++; cnt++; }
+  for (let i = 0; i < N; i++) if (lum[i] > 100) { hist[br[i] + 256]++; cnt++; }
   let acc = 0, med = 0; for (let k = 0; k < 512; k++) { acc += hist[k]; if (acc >= cnt / 2) { med = k - 256; break; } }
-  const T = med + 9; // 흰 스펀지보다 확실히 푸른 곳
+  const runs = []; // 조명에 따라 푸른 정도가 달라서 기준을 몇 단계로 시도
+  for (const dT of [9, 6, 13, 4]) {
+    const r = findLabelsAt(id, lum, br, med + dT);
+    runs.push(r);
+    if (r.ok) { r.dT = dT; return r; }
+  }
+  const best = runs.sort((a, b) => (b.rowsFound || 0) - (a.rowsFound || 0))[0];
+  return best;
+}
+function findLabelsAt(id, lum, br, T) {
+  const W = id.width, H = id.height, d = id.data, N = W * H;
   const m = new Uint8Array(N);
   for (let i = 0, p = 0; i < N; i++, p += 4) {
     const r = d[p], g = d[p + 1], b = d[p + 2];
-    if (lum[i] > 95 && br[i] >= T && b >= g - 8) m[i] = 1;
-    else if (r > 120 && g > 100 && r - b > 60 && g - b > 40) m[i] = 2;
+    if (lum[i] > 90 && br[i] >= T && b >= g - 10) m[i] = 1;
+    else if (r > 120 && g > 100 && r - b > 55 && g - b > 35) m[i] = 2;
   }
-  // 덩어리 찾기
-  const seen = new Uint8Array(N), stack = new Int32Array(N), blobs = [];
+  // 덩어리(번호표 한 장, 또는 붙어 보이는 여러 장)
+  const seen = new Uint8Array(N), stack = new Int32Array(N), segs = [];
   for (let s0 = 0; s0 < N; s0++) {
     if (!m[s0] || seen[s0]) continue;
     const kind = m[s0]; let sp = 0; stack[sp++] = s0; seen[s0] = 1;
-    let x0 = W, y0 = H, x1 = 0, y1 = 0, a = 0;
+    let x0 = W, y0 = H, x1 = 0, y1 = 0, a = 0, sy = 0;
     while (sp) {
-      const i = stack[--sp], x = i % W, y = (i / W) | 0; a++;
+      const i = stack[--sp], x = i % W, y = (i / W) | 0; a++; sy += y;
       if (x < x0) x0 = x; if (x > x1) x1 = x; if (y < y0) y0 = y; if (y > y1) y1 = y;
       if (x > 0 && m[i - 1] === kind && !seen[i - 1]) { seen[i - 1] = 1; stack[sp++] = i - 1; }
       if (x < W - 1 && m[i + 1] === kind && !seen[i + 1]) { seen[i + 1] = 1; stack[sp++] = i + 1; }
@@ -451,86 +462,112 @@ function findLabels(id) {
       if (y < H - 1 && m[i + W] === kind && !seen[i + W]) { seen[i + W] = 1; stack[sp++] = i + W; }
     }
     const w = x1 - x0 + 1, h = y1 - y0 + 1;
-    if (w < W * 0.006 || h < 4 || w > W * 0.07 || h > W * 0.06) continue;
-    const ar = w / h, fill = a / (w * h);
-    if (ar < 0.7 || ar > 3.2 || fill < 0.3) continue;
-    blobs.push({cx: (x0 + x1) / 2, cy: (y0 + y1) / 2, w, h, kind});
+    if (h < Math.max(4, H * 0.006) || h > H * 0.08 || w < h * 0.7 || w > W * 0.45) continue;
+    if (a / (w * h) < 0.3) continue;
+    segs.push({x0, x1, y0, y1, w, h, cx: (x0 + x1) / 2, cy: sy / a, kind, fill: a / (w * h)});
   }
-  // 옆으로 이어진 번호표끼리 줄 만들기
-  blobs.sort((a, b) => a.cx - b.cx);
-  blobs.forEach(b => { b.next = null; b.prev = null; });
-  blobs.forEach(a => {
-    let best = null, bd = 1e9;
-    for (const b of blobs) {
-      const dx = b.cx - a.cx; if (dx <= a.w * 0.5 || dx > Math.max(a.w, b.w) * 2.8) continue;
-      if (Math.abs(b.cy - a.cy) > Math.max(a.h, b.h) * 0.6) continue;
-      if (b.h / a.h > 1.7 || a.h / b.h > 1.7) continue;
-      if (dx < bd) { bd = dx; best = b; }
-    }
-    if (best && (!best.prev || best.cx - best.prev.cx > bd)) { if (best.prev) best.prev.next = null; best.prev = a; a.next = best; }
+  // 같은 줄에 옆으로 이어진 덩어리끼리 묶기 → 번호표 줄
+  segs.sort((a, b) => a.x0 - b.x0);
+  const par = segs.map((_, i) => i), f = i => par[i] === i ? i : (par[i] = f(par[i]));
+  for (let i = 0; i < segs.length; i++) for (let j = i + 1; j < segs.length; j++) {
+    const a = segs[i], b = segs[j], hh = Math.max(a.h, b.h);
+    if (b.x0 - a.x1 > hh * 1.4) continue;
+    if (Math.abs(a.cy - b.cy) > hh * 0.6 || a.h / b.h > 1.8 || b.h / a.h > 1.8) continue;
+    par[f(j)] = f(i);
+  }
+  const groups = {}; segs.forEach((s, i) => (groups[f(i)] = groups[f(i)] || []).push(s));
+  // 번호표 한 장 간격 추정: 따로 떨어져 보이는 한 장짜리 덩어리들
+  const singles = segs.filter(s => s.kind === 1 && s.w / s.h >= 0.8 && s.w / s.h <= 2.3);
+  const sw = singles.length ? singles.map(s => s.w).sort((a, b) => a - b)[singles.length >> 1] : null;
+  let rows = [];
+  Object.values(groups).forEach(g => {
+    const xL = Math.min(...g.map(s => s.x0)), xR = Math.max(...g.map(s => s.x1));
+    const hs = g.map(s => s.h).sort((a, b) => a - b), h = hs[hs.length >> 1], ext = xR - xL;
+    const cover = g.reduce((s, q) => s + q.w, 0) / ext;
+    if (ext / h < 6 || ext / h > 40 || cover < 0.45) return;
+    // 기울기: 덩어리 중심으로 직선
+    let sx = 0, sy = 0, sxx = 0, sxy = 0; g.forEach(s => { sx += s.cx; sy += s.cy; sxx += s.cx * s.cx; sxy += s.cx * s.cy; });
+    const n = g.length, den = n * sxx - sx * sx, k = n > 1 && Math.abs(den) > 1e-6 ? (n * sxy - sx * sy) / den : 0, b0 = (sy - k * sx) / n;
+    // 장수 추정(간격을 알면), 모르면 12장
+    let cntL = 12, pitch = ext / 12;
+    const ws = g.filter(s => s.kind === 1 && s.w / s.h <= 2.3).map(s => s.w).sort((a, b) => a - b);
+    const lw = ws.length ? ws[ws.length >> 1] : sw;
+    if (lw) { const gap = Math.max(0, (ext - 12 * lw) / 11); const p = lw + gap; cntL = Math.round((ext + gap) / p); if (cntL >= 12) cntL = 12; pitch = cntL >= 12 ? ext / 12 : p; }
+    if (cntL < 9) return;
+    const pts = [];
+    for (let i = 0; i < cntL; i++) { const x = xL + pitch * (i + 0.5); pts.push({cx: x, cy: k * x + b0, kind: 1}); }
+    g.filter(s => s.kind === 2).forEach(s => { let bi = 0, bd = 1e9; pts.forEach((p, i) => { const dd = Math.abs(p.cx - s.cx); if (dd < bd) { bd = dd; bi = i; } }); pts[bi].kind = 2; });
+    pts.ext = ext; pts.y = k * (xL + xR) / 2 + b0; pts.xL = xL; pts.xR = xR; pts.h = h;
+    pts.fill = g.reduce((s, q) => s + q.fill * q.w, 0) / g.reduce((s, q) => s + q.w, 0);
+    rows.push(pts);
   });
-  let chains = [];
-  blobs.forEach(b => { if (b.prev) return; const c = []; for (let q = b; q; q = q.next) c.push(q); if (c.length >= 5) chains.push(c); });
-  // 빠진 번호표 메우기 + 너무 넓은 틈에서 끊기(보관함 사이)
-  const fixed = [];
-  chains.forEach(c => {
-    const dxs = c.slice(1).map((q, i) => q.cx - c[i].cx).sort((a, b) => a - b), s = dxs[dxs.length >> 1];
-    let cur = [c[0]];
-    for (let i = 1; i < c.length; i++) {
-      const a = c[i - 1], b = c[i], dx = b.cx - a.cx;
-      if (dx > s * 2.6) { fixed.push(cur); cur = [b]; continue; }
-      const k = Math.round(dx / s);
-      for (let j = 1; j < k; j++) cur.push({cx: a.cx + dx * j / k, cy: a.cy + (b.cy - a.cy) * j / k, w: a.w, h: a.h, kind: 0});
-      cur.push(b);
-    }
-    fixed.push(cur);
-  });
-  window.__rows = fixed.filter(c => c.length >= 3).map(c => c.length);
-  chains = fixed.filter(c => c.length >= 8 && c.length <= 14);
+  const rowsFound = rows.length;
+  window.__rows = rows.map(r => r.length);
   const need = side === 'ALL' ? 8 : 4;
-  if (chains.length < need) return {ok: false, msg: `번호표 줄을 ${chains.length}줄만 찾았어요(필요 ${need}줄). 보관함이 화면에 크게, 다 보이게 놓고 다시 해 주세요`};
-  // 보관함(세로 묶음) 나누기
-  const mx = c => c.reduce((s, q) => s + q.cx, 0) / c.length, my = c => c.reduce((s, q) => s + q.cy, 0) / c.length;
-  chains.sort((a, b) => mx(a) - mx(b));
+  if (rows.length < need) return {ok: false, rowsFound, msg: `번호표 줄을 ${rows.length}줄만 찾았어요(필요 ${need}줄). 보관함이 화면에 크게, 다 보이게 놓고 다시 해 주세요`};
+  // 보관함 하나 = 왼쪽·오른쪽 끝이 거의 같은 번호표 줄 4개가 고르게 쌓인 묶음. 창문 블라인드 같은 가짜 줄을 거름
+  const groups4 = [];
+  rows.forEach((r0, i) => {
+    const tol = r0.ext * 0.14;
+    const mem = rows.filter(r => Math.abs(r.xL - r0.xL) < tol && Math.abs(r.xR - r0.xR) < tol && r.ext / r0.ext > 0.75 && r.ext / r0.ext < 1.33);
+    if (mem.length < 4) return;
+    mem.sort((a, b) => a.y - b.y);
+    for (let a = 0; a < mem.length; a++) for (let b = a + 1; b < mem.length; b++) for (let c = b + 1; c < mem.length; c++) for (let e = c + 1; e < mem.length; e++) {
+      const q = [mem[a], mem[b], mem[c], mem[e]], gaps = [q[1].y - q[0].y, q[2].y - q[1].y, q[3].y - q[2].y];
+      const gm = (gaps[0] + gaps[1] + gaps[2]) / 3; if (gm < r0.h * 2) continue;
+      const irr = gaps.reduce((s, g) => s + Math.abs(g - gm), 0) / gm;
+      const xs = q.reduce((s, r) => s + Math.abs(r.xL - r0.xL) + Math.abs(r.xR - r0.xR), 0) / r0.ext;
+      const fl = q.reduce((s, r) => s + r.fill, 0) / 4; // 번호표는 글자 때문에 꽉 차지 않음
+      groups4.push({q, score: irr * 2 + xs + Math.max(0, fl - 0.85) * 5, x0: Math.min(...q.map(r => r.xL)), x1: Math.max(...q.map(r => r.xR)), y0: q[0].y, y1: q[3].y, gm});
+    }
+  });
+  if (!groups4.length) return {ok: false, rowsFound, msg: '번호표 줄 4개가 고르게 쌓인 보관함 모양을 찾지 못했어요. 보관함이 화면에 크게, 다 보이게 놓고 다시 해 주세요'};
   let cols;
   if (side === 'ALL') {
-    let gi = 0, gv = -1; for (let i = 1; i < chains.length; i++) { const g = mx(chains[i]) - mx(chains[i - 1]); if (g > gv) { gv = g; gi = i; } }
-    cols = [chains.slice(0, gi), chains.slice(gi)];
-  } else cols = [chains];
-  cols = cols.map(cl => cl.sort((a, b) => b.length - a.length).slice(0, 4).sort((a, b) => my(a) - my(b)));
-  if (cols.some(cl => cl.length !== 4)) return {ok: false, msg: '보관함 두 개의 번호표 줄을 4줄씩 나누지 못했어요. 보관함이 화면에 다 들어오게 해 주세요'};
-  // 가장자리 번호표 1~3장이 잘리거나 가려진 줄은 같은 보관함의 다른 줄을 보고 모자란 쪽 끝을 이어 붙임
-  // 다른 줄도 다 모자라면(비스듬히 찍혀 옆 보관함에 가린 경우) 옆 보관함 쪽 끝이 가려진 것으로 봄
+    let best = null;
+    for (const A of groups4) for (const B of groups4) {
+      if (A.x1 >= B.x0) continue; // A가 왼쪽
+      const ov = Math.min(A.y1, B.y1) - Math.max(A.y0, B.y0); if (ov < Math.min(A.y1 - A.y0, B.y1 - B.y0) * 0.5) continue;
+      if (B.x0 - A.x1 > (A.x1 - A.x0) * 0.6) continue; // 두 보관함은 붙어 있음
+      const sc = A.score + B.score + Math.abs(A.gm - B.gm) / A.gm;
+      if (!best || sc < best.sc) best = {sc, A, B};
+    }
+    if (!best) return {ok: false, rowsFound, msg: '나란히 붙은 보관함 두 개를 찾지 못했어요. 보관함 두 개가 화면에 다 들어오게 해 주세요'};
+    cols = [best.A.q.map(r => r.slice()), best.B.q.map(r => r.slice())];
+  } else {
+    groups4.sort((a, b) => a.score - b.score);
+    cols = [groups4[0].q.map(r => r.slice())];
+  }
+  // 12장보다 적게 보이는 줄(비스듬히 찍혀 가려짐): 같은 보관함 다른 줄을 보고 모자란 끝을 이어 붙임
   let guessed = 0;
   cols.forEach((cl, ci) => {
     const full = cl.filter(c => c.length >= 12);
     const fx0 = full.length ? full.reduce((s, c) => s + c[0].cx, 0) / full.length : null, fx1 = full.length ? full.reduce((s, c) => s + c[c.length - 1].cx, 0) / full.length : null;
     cl.forEach(c => {
-      if (c.length >= 12 || c.length < 9) return;
-      const sp = (c[c.length - 1].cx - c[0].cx) / (c.length - 1), dy = (c[c.length - 1].cy - c[0].cy) / (c.length - 1);
+      if (c.length >= 12) return;
+      const sp = (c[c.length - 1].cx - c[0].cx) / Math.max(1, c.length - 1), dy = (c[c.length - 1].cy - c[0].cy) / Math.max(1, c.length - 1);
       while (c.length < 12) {
         guessed++;
         const missStart = fx0 !== null ? Math.abs(c[0].cx - fx0) > Math.abs(c[c.length - 1].cx - fx1) : (cols.length === 2 && ci === 1);
-        if (missStart) c.unshift({cx: c[0].cx - sp, cy: c[0].cy - dy, w: c[0].w, h: c[0].h, kind: 0});
-        else c.push({cx: c[c.length - 1].cx + sp, cy: c[c.length - 1].cy + dy, w: c[0].w, h: c[0].h, kind: 0});
+        if (missStart) c.unshift({cx: c[0].cx - sp, cy: c[0].cy - dy, kind: 0});
+        else c.push({cx: c[c.length - 1].cx + sp, cy: c[c.length - 1].cy + dy, kind: 0});
       }
     });
   });
-  // 노란 112번으로 좌우 뒤집힘·오른쪽 보관함 찾기
+  // 노란 112번(오른쪽 보관함 맨 아래 줄 왼쪽에서 8번째)으로 좌우 뒤집힘·오른쪽 보관함 찾기
   let mirrored = null, rCol = null;
   cols.forEach((cl, ci) => { const row = cl[3], j = row.findIndex(q => q.kind === 2); if (j < 0) return; rCol = ci; if (j === 7) mirrored = false; else if (j === row.length - 1 - 7) mirrored = true; });
-  if (mirrored === null) mirrored = calib && calib[0] ? calib[0].x1 > calib[0].x2 : false; // 못 찾으면 전에 맞춘 방향을 따름
+  if (mirrored === null) mirrored = calib && calib[0] ? calib[0].x1 > calib[0].x2 : false;
   if (side === 'ALL' && rCol === null) rCol = mirrored ? 0 : 1;
   const colOf = box => side !== 'ALL' ? 0 : (box === 'R' ? rCol : 1 - rCol);
   const rowIdx = {L: 0, R: 0}, out = [];
   for (const r of activeRows()) {
     let row = cols[colOf(r.box)][rowIdx[r.box]++].slice();
     if (mirrored) row.reverse();
-    if (row.length < r.slots.length) return {ok: false, msg: `${r.slots[0]}번 줄 번호표가 모자라요`};
     const pts = r.slots.map((_, k) => [row[k].cx / W, row[k].cy / H]);
     out.push({x1: pts[0][0], y1: pts[0][1], x2: pts[pts.length - 1][0], y2: pts[pts.length - 1][1], pts});
   }
-  return {ok: true, calib: out, found: out.reduce((s, c) => s + c.pts.length, 0), mirrored, yellow: rCol !== null, guessed};
+  return {ok: true, rowsFound, calib: out, found: out.reduce((s, c) => s + c.pts.length, 0), mirrored, yellow: rCol !== null, guessed};
 }
 function frameOk() {
   if (camDead()) return '카메라가 꺼져 있어요. 설정 ▾ → [다시 켜기]를 누르고 다시 해 주세요';
@@ -761,7 +798,19 @@ document.addEventListener('pointerdown', () => {
 setMenu((function(){ try { return localStorage.getItem('nxmenu') !== '0'; } catch (e) { return true; } })());
 // AMOLED(노트9) 번인 방지: 검은 화면으로 가려도 카메라·검사는 계속 돈다
 let dimmed = false;
-function setDim(on) { dimmed = on; $('dim').style.display = on ? 'flex' : 'none'; }
+// 검은 화면 위에 '감시 중 · 마지막 검사 시각'을 흐리게 표시(꺼진 것과 구별), 번인 막으려고 1분마다 자리 이동
+function dimText() {
+  if (!dimmed) return;
+  const occ = Object.values(slotState).filter(s => s.s === 1).length;
+  const ok = lastCheck && Date.now() - lastCheck < INTERVAL * 3;
+  const t = $('dimTxt');
+  t.innerHTML = (ok ? '감시 중' : '⚠ 검사 멈춤') + ' · 마지막 검사 ' + (lastCheck ? hhmmss(lastCheck) : '-') + '<br>꽂힘 ' + occ + '칸 · 화면을 누르면 다시 보여요';
+  t.style.color = ok ? '#6b7280' : '#b45309';
+  const m = new Date().getMinutes();
+  t.style.left = (10 + (m * 37) % 50) + '%'; t.style.top = (15 + (m * 23) % 60) + '%';
+}
+setInterval(dimText, 10000);
+function setDim(on) { dimmed = on; $('dim').style.display = on ? 'block' : 'none'; dimText(); }
 $('bDim').onclick = () => setDim(true);
 $('dim').onclick = () => setDim(false);
 let idleTimer = null;
