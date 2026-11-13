@@ -372,7 +372,7 @@ function align() { // 성공하면 true (Hn·aligned 갱신)
   const src = cv.matFromImageData(cur), gray = new cv.Mat(); cv.cvtColor(src, gray, cv.COLOR_RGBA2GRAY);
   const orb = new cv.ORB(4000), kp = new cv.KeyPointVector(), des = new cv.Mat(), none = new cv.Mat();
   orb.detectAndCompute(gray, none, kp, des);
-  let ok = false; alInfo = {fail: alInfo.fail, ref: refPrep.des.rows, cur: des.rows, good: 0, inl: 0};
+  let ok = false; Object.assign(alInfo, {ref: refPrep.des.rows, cur: des.rows, good: 0, inl: 0});
   if (des.rows >= 10 && refPrep.des.rows >= 10) {
     const bf = new cv.BFMatcher(cv.NORM_HAMMING, false), mm = new cv.DMatchVectorVector();
     bf.knnMatch(refPrep.des, des, mm, 2);
@@ -401,6 +401,45 @@ function align() { // 성공하면 true (Hn·aligned 갱신)
   }
   src.delete(); gray.delete(); orb.delete(); kp.delete(); des.delete(); none.delete();
   return ok;
+}
+// 번호표로 따라가기: 지금 화면에서 번호표를 다시 찾아, 영점 때 번호표 자리와 짝지어 화면 이동을 계산
+// (번호표는 폰이 꽂혀도 대부분 보이고, 노트9에서 영점 맞추기로 이미 잘 찾는 게 확인됨)
+function trackLabels() {
+  if (!CV || !refImg || !calib || !calib[0] || !calib[0].pts) return false;
+  const res = findLabels(frameAt(DET_W));
+  alInfo.lab = res.ok ? res.found : 0;
+  if (!res.ok || res.calib.length !== calib.length) return false;
+  const w = refImg.width, hh = refImg.height, a = [], b = [];
+  calib.forEach((c, i) => { const d = res.calib[i]; if (!d || !d.pts || !c.pts) return; c.pts.forEach((p, k) => { const q = d.pts[k]; if (q) { a.push(p[0] * w, p[1] * hh); b.push(q[0] * w, q[1] * hh); } }); });
+  if (a.length / 2 < 30) return false;
+  const cv = CV, A = cv.matFromArray(a.length / 2, 1, cv.CV_32FC2, a), B = cv.matFromArray(b.length / 2, 1, cv.CV_32FC2, b), inl = new cv.Mat();
+  const H = cv.findHomography(A, B, cv.RANSAC, w * 0.008, inl);
+  let n = 0; for (let i = 0; i < inl.rows; i++) if (inl.data[i]) n++;
+  alInfo.labInl = n;
+  let ok = false;
+  if (!H.empty() && n >= a.length / 2 * 0.6 && sane(H.data64F, w, hh)) {
+    const src = cv.matFromImageData(frameAt(w)), out = new cv.Mat();
+    cv.warpPerspective(src, out, H, new cv.Size(w, hh), cv.INTER_LINEAR | cv.WARP_INVERSE_MAP);
+    aligned = new ImageData(new Uint8ClampedArray(out.data), w, hh);
+    Hn = hMapToNorm(Array.from(H.data64F), w, hh); lastInl = n; ok = true;
+    src.delete(); out.delete();
+  }
+  A.delete(); B.delete(); inl.delete(); H.delete();
+  return ok;
+}
+// 펴 놓은 지금 화면(aligned)이 기준 사진과 얼마나 같은지(폰 칸은 빼고 틀·번호표 줄만) — 작을수록 잘 맞음
+let refMaskCache = null;
+function alignErr(img) {
+  if (!refImg || !img) return 1e9;
+  const w = refImg.width, h = refImg.height;
+  if (!refMaskCache || refMaskCache.w !== w || refMaskCache.n !== regions.length) refMaskCache = {w, n: regions.length, m: anchorMask(w, h)};
+  const m = refMaskCache.m, A = img.data, B = refImg.data;
+  let sa = 0, sb = 0, cnt = 0;
+  for (let y = 0; y < h; y += 3) for (let x = 0; x < w; x += 3) { const i = y * w + x; if (!m[i]) continue; const p = i * 4; sa += A[p] + A[p + 1] + A[p + 2]; sb += B[p] + B[p + 1] + B[p + 2]; cnt++; }
+  if (!cnt || !sa) return 1e9;
+  const k = sb / sa; let e = 0;
+  for (let y = 0; y < h; y += 3) for (let x = 0; x < w; x += 3) { const i = y * w + x; if (!m[i]) continue; const p = i * 4; e += Math.abs((A[p] + A[p + 1] + A[p + 2]) * k - (B[p] + B[p + 1] + B[p + 2])) / 3; }
+  return e / cnt;
 }
 function hMapToNorm(h, w, hh) { // S⁻¹·H·S, S = diag(w, hh, 1)
   return [h[0], h[1] * hh / w, h[2] / w, h[3] * w / hh, h[4], h[5] / hh, h[6] * w, h[7] * hh, h[8]];
@@ -666,7 +705,14 @@ async function check() {
   if (!Object.keys(base).length) { msg('보관함이 비었을 때 [빈 보관함 기준 저장]을 눌러 주세요'); return; }
   let cam, useA = false;
   // 1순위: 번호표 무늬 대조(자동 다시 맞추기). 안 되면 2순위: 작은 흔들림 보정(카메라가 거의 그대로면 그대로 검사)
-  if (CV && refPrep) { let ok = false; try { ok = align(); } catch (e) { ok = false; alInfo.err = String(e.message || e).slice(0, 40); }
+  if (CV && refPrep) { let ok = false; alInfo.how = '';
+    // 두 방법(무늬 대조·번호표 따라가기)을 다 해 보고, 기준 사진과 더 잘 맞는 쪽을 씀
+    const cands = [];
+    try { if (align()) cands.push({how: '무늬', Hn, aligned, e: alignErr(aligned)}); } catch (e) { alInfo.err = String(e.message || e).slice(0, 40); }
+    try { if (trackLabels()) cands.push({how: '번호표', Hn, aligned, e: alignErr(aligned)}); } catch (e) { alInfo.err = 'L:' + String(e.message || e).slice(0, 30); }
+    cands.sort((a, b) => a.e - b.e);
+    alInfo.errs = cands.map(c => c.how + Math.round(c.e)).join('/');
+    if (cands.length && cands[0].e < 30) { ({Hn, aligned} = cands[0]); alInfo.how = cands[0].how; ok = true; }
     if (ok) { cam = camFlag(false); useA = true; alInfo.fail = 0; } else { Hn = null; aligned = null; alInfo.fail = (alInfo.fail || 0) + 1; cam = await camCheck(); } }
   else cam = await camCheck();
   if (cam !== 'ok') {
@@ -708,7 +754,7 @@ async function check() {
   const occ = Object.values(slotState).filter(s => s.s === 1).length;
   if (now - lastBeat > BEAT) {
     lastBeat = now;
-    const note = `맞춤 ${Hn ? '무늬대조' : (off.x || off.y) ? '흔들림보정' : '그대로'} · 점 ${alInfo.ref || 0}/${alInfo.cur || 0} · 짝 ${alInfo.good || 0} · 일치 ${alInfo.inl || 0}${alInfo.sane === false ? ' · 모양이상' : ''} · 연속실패 ${alInfo.fail || 0}${alInfo.err ? ' · ' + alInfo.err : ''}`;
+    const note = `맞춤 ${Hn ? (alInfo.how || '무늬') : (off.x || off.y) ? '흔들림보정' : '그대로'} · 차이 ${alInfo.errs || '-'} · 번호표 ${alInfo.lab || 0}칸/일치 ${alInfo.labInl || 0} · 점 ${alInfo.ref || 0}/${alInfo.cur || 0} · 짝 ${alInfo.good || 0} · 일치 ${alInfo.inl || 0}${alInfo.sane === false ? ' · 모양이상' : ''} · 연속실패 ${alInfo.fail || 0}${alInfo.err ? ' · ' + alInfo.err : ''}`;
     try { await call({type: 'beat', occupied: occ, side, note}); serverOk = true; } catch (e) { serverOk = false; }
   }
   msg(evs.length ? `바뀐 칸 ${evs.length}개 기록` : '감시 중');
