@@ -822,7 +822,8 @@ $('thr').oninput = e => {
   clearTimeout(thrTimer); thrTimer = setTimeout(saveSettings, 1500);
 };
 $('bStart').onclick = () => startCam($('cam').value || null);
-$('cam').onchange = e => startCam(e.target.value);
+// 고른 카메라(예: camera2 2)를 이 기기에 기억 → 다시 열어도 같은 카메라로 켬(영점이 안 어긋나게)
+$('cam').onchange = e => { try { localStorage.setItem('nxcam', e.target.value); } catch (er) {} startCam(e.target.value); };
 // 앞/뒤 카메라 전환(전면이 더 넓게 보이는 기기도 있음). 고른 방향은 이 기기에 기억
 let facing = (function(){ try { return localStorage.getItem('nxfacing') || 'environment'; } catch (e) { return 'environment'; } })();
 function afterTransform(t) {
@@ -835,7 +836,7 @@ $('bRot').onclick = () => { rot = (rot + 90) % 360; try { localStorage.setItem('
 $('bMir').onclick = () => { flipX = !flipX; try { localStorage.setItem('nxmir', flipX ? '1' : '0'); } catch (e) {} afterTransform('좌우를 뒤집었어요.'); };
 $('bFlip').onclick = () => {
   facing = facing === 'environment' ? 'user' : 'environment';
-  try { localStorage.setItem('nxfacing', facing); } catch (e) {}
+  try { localStorage.setItem('nxfacing', facing); localStorage.removeItem('nxcam'); } catch (e) {}
   startCam(null);
   msg(facing === 'user' ? '앞면 카메라로 바꿨어요. 칸 위치가 달라지니 [칸 맞추기]를 다시 해 주세요' : '뒷면 카메라로 바꿨어요. 칸 위치가 달라지니 [칸 맞추기]를 다시 해 주세요');
 };
@@ -896,7 +897,9 @@ document.addEventListener('visibilitychange', () => {
   askServerUrl();
   loadCv();
   await loadSettings();
-  await startCam(null);
+  let saved = null; try { saved = localStorage.getItem('nxcam'); } catch (e) {}
+  await startCam(saved || null);
+  if (saved && !v.videoWidth) await startCam(null); // 기억한 카메라가 없어졌으면 기본 카메라로
   setInterval(check, INTERVAL);
   // 충전기 연결 전제: 화면이 켜져 있을 때는 부드럽게(초당 약 10장), 검은 화면일 때는 그리지 않음
   setInterval(() => { if (!dimmed) render(); }, 100);
